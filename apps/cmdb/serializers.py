@@ -55,7 +55,7 @@ class CIListSerializer(serializers.ModelSerializer):
 class CIDetailSerializer(serializers.ModelSerializer):
     """Full CI detail serializer with nested relations"""
     category_name = serializers.CharField(source='category.name', read_only=True)
-    owner_name = serializers.CharField(source='owner.get_full_name', read_only=True)
+    owner_name = serializers.CharField(source='owner_team.name', read_only=True)
 
     # Nested serializers
     attributes = CIAttributeValueSerializer(many=True, read_only=True, source='attributes')
@@ -65,7 +65,7 @@ class CIDetailSerializer(serializers.ModelSerializer):
         model = CI
         fields = [
             'id', 'organization', 'ci_number', 'name', 'description', 'category', 'category_name',
-            'serial_number', 'status', 'owner', 'owner_name',
+            'serial_number', 'status', 'owner_team', 'owner_name',
             'location', 'attributes', 'related_cis',
             'created_at', 'updated_at', 'created_by', 'updated_by'
         ]
@@ -78,5 +78,5 @@ class CICreateUpdateSerializer(serializers.ModelSerializer):
         model = CI
         fields = [
             'ci_number', 'name', 'description', 'category', 'serial_number',
-            'owner', 'location'
+            'owner_team', 'location'
         ]
