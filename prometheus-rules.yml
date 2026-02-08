@@ -1,0 +1,104 @@
+name: ITSM Monitoring Rules
+description: Alerting rules for ITSM Platform
+groups:
+  - name: django
+    interval: 30s
+    rules:
+      - alert: DjangoDown
+        expr: up{job="django"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Django application is down"
+          description: "Django backend at {{ $labels.instance }} is down"
+
+      - alert: HighErrorRate
+        expr: rate(django_http_requests_total{status=~"5.."}[5m]) > 0.05
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High error rate detected"
+          description: "Error rate is {{ $value | humanizePercentage }}"
+
+      - alert: SlowResponseTime
+        expr: django_http_request_duration_seconds_bucket{le="+Inf"} > 1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Slow response times detected"
+          description: "Response time is {{ $value }}s"
+
+  - name: database
+    interval: 30s
+    rules:
+      - alert: PostgreSQLDown
+        expr: up{job="postgres"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "PostgreSQL is down"
+          description: "PostgreSQL database is not responding"
+
+      - alert: HighConnectionCount
+        expr: pg_stat_activity_count > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High number of database connections"
+          description: "Database has {{ $value }} active connections"
+
+      - alert: LowDiskSpace
+        expr: node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.1
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "Low disk space"
+          description: "Disk usage is above 90%"
+
+  - name: redis
+    interval: 30s
+    rules:
+      - alert: RedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Redis is down"
+          description: "Redis cache is not responding"
+
+      - alert: HighMemoryUsage
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High Redis memory usage"
+          description: "Redis memory usage is {{ $value | humanizePercentage }}"
+
+  - name: nginx
+    interval: 30s
+    rules:
+      - alert: NginxDown
+        expr: up{job="nginx"} == 0
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "Nginx is down"
+          description: "Nginx reverse proxy is not responding"
+
+      - alert: HighRequestRate
+        expr: rate(nginx_requests_total[5m]) > 1000
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "High request rate"
+          description: "Request rate is {{ $value | humanize }} req/s"

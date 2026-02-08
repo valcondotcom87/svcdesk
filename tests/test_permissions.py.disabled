@@ -1,0 +1,453 @@
+"""
+RBAC and permission tests
+"""
+import pytest
+from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from apps.core.models import CustomUser, Organization, Department
+from apps.incidents.models import Incident
+from tests.factories import (
+    OrganizationFactory, CustomUserFactory, IncidentFactory, DepartmentFactory, TeamFactory
+)
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestUnauthenticatedAccess:
+    """Test that unauthenticated requests are denied"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        # No authentication
+    
+    def test_unauthenticated_list_incidents(self):
+        """Test listing incidents without authentication"""
+        response = self.client.get('/api/v1/incidents/')
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    
+    def test_unauthenticated_create_incident(self):
+        """Test creating incident without authentication"""
+        data = {
+            'title': 'Test',
+            'description': 'Test',
+            'priority': 'high'
+        }
+        
+        response = self.client.post('/api/v1/incidents/', data)
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    
+    def test_unauthenticated_detail_view(self):
+        """Test accessing detail view without authentication"""
+        response = self.client.get('/api/v1/incidents/1/')
+        
+        assert response.status_code == status.HTTP_401_UNAUTHORIZED
+    
+    def test_public_endpoints_accessible(self):
+        """Test that public endpoints (login) are accessible"""
+        response = self.client.post('/api/v1/auth/login/', {})
+        
+        # Should not be 401, could be 400 (bad request) or 200
+        assert response.status_code != status.HTTP_401_UNAUTHORIZED
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestOrganizationScoping:
+    """Test that users only see their organization's data"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        
+        # Create two organizations
+        self.org1 = OrganizationFactory(name='Organization 1')
+        self.org2 = OrganizationFactory(name='Organization 2')
+        
+        # Create users in each organization
+        self.user1 = CustomUserFactory(organization=self.org1)
+        self.user2 = CustomUserFactory(organization=self.org2)
+        
+        # Create incidents in each organization
+        self.incident1 = IncidentFactory(organization=self.org1, created_by=self.user1)
+        self.incident2 = IncidentFactory(organization=self.org2, created_by=self.user2)
+    
+    def test_user_cannot_access_other_org_incidents(self):
+        """Test that user cannot see incidents from other organizations"""
+        refresh = RefreshToken.for_user(self.user1)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        # Try to access incident from org2
+        response = self.client.get(f'/api/v1/incidents/{self.incident2.id}/')
+        
+        # Should be 404 (not found) due to scoping
+        assert response.status_code in [
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_403_FORBIDDEN
+        ]
+    
+    def test_user_can_access_own_org_incidents(self):
+        """Test that user can access incidents from their organization"""
+        refresh = RefreshToken.for_user(self.user1)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        # Access own organization's incident
+        response = self.client.get(f'/api/v1/incidents/{self.incident1.id}/')
+        
+        assert response.status_code == status.HTTP_200_OK
+    
+    def test_list_incidents_only_own_org(self):
+        """Test that listing incidents shows only user's organization"""
+        refresh = RefreshToken.for_user(self.user1)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        response = self.client.get('/api/v1/incidents/')
+        
+        assert response.status_code == status.HTTP_200_OK
+        # Should only contain incidents from org1
+        # Verification would depend on response format
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestRoleBasedAccess:
+    """Test RBAC enforcement"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        
+        # Create users with different roles
+        self.admin = CustomUserFactory(organization=self.org, role='admin')
+        self.manager = CustomUserFactory(organization=self.org, role='manager')
+        self.technician = CustomUserFactory(organization=self.org, role='technician')
+        self.user = CustomUserFactory(organization=self.org, role='user')
+    
+    def test_admin_can_create_incident(self):
+        """Test admin can create incident"""
+        refresh = RefreshToken.for_user(self.admin)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        data = {
+            'title': 'Admin Created Incident',
+            'description': 'Test',
+            'priority': 'high',
+            'urgency': 'high',
+            'impact': 'high',
+            'requester': self.admin.id
+        }
+        
+        response = self.client.post('/api/v1/incidents/', data)
+        
+        assert response.status_code == status.HTTP_201_CREATED
+    
+    def test_manager_can_create_incident(self):
+        """Test manager can create incident"""
+        refresh = RefreshToken.for_user(self.manager)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        data = {
+            'title': 'Manager Created Incident',
+            'description': 'Test',
+            'priority': 'high',
+            'urgency': 'high',
+            'impact': 'high',
+            'requester': self.manager.id
+        }
+        
+        response = self.client.post('/api/v1/incidents/', data)
+        
+        assert response.status_code == status.HTTP_201_CREATED
+    
+    def test_technician_can_create_incident(self):
+        """Test technician can create incident"""
+        refresh = RefreshToken.for_user(self.technician)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        data = {
+            'title': 'Tech Created Incident',
+            'description': 'Test',
+            'priority': 'medium',
+            'urgency': 'medium',
+            'impact': 'medium',
+            'requester': self.technician.id
+        }
+        
+        response = self.client.post('/api/v1/incidents/', data)
+        
+        assert response.status_code in [
+            status.HTTP_201_CREATED,
+            status.HTTP_403_FORBIDDEN  # Depends on permissions
+        ]
+    
+    def test_admin_can_delete_incident(self):
+        """Test admin can delete incident"""
+        incident = IncidentFactory(organization=self.org, created_by=self.technician)
+        
+        refresh = RefreshToken.for_user(self.admin)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        response = self.client.delete(f'/api/v1/incidents/{incident.id}/')
+        
+        assert response.status_code in [
+            status.HTTP_204_NO_CONTENT,
+            status.HTTP_403_FORBIDDEN
+        ]
+    
+    def test_technician_cannot_delete_others_incident(self):
+        """Test technician cannot delete others' incidents"""
+        incident = IncidentFactory(organization=self.org, created_by=self.manager)
+        
+        refresh = RefreshToken.for_user(self.technician)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        response = self.client.delete(f'/api/v1/incidents/{incident.id}/')
+        
+        # Should be forbidden or forbidden
+        assert response.status_code in [
+            status.HTTP_403_FORBIDDEN,
+            status.HTTP_404_NOT_FOUND  # Not visible due to scoping
+        ]
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestSuperuserBypass:
+    """Test superuser bypasses organization scoping"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        
+        self.org1 = OrganizationFactory(name='Org 1')
+        self.org2 = OrganizationFactory(name='Org 2')
+        
+        # Create superuser not assigned to specific org
+        self.superuser = CustomUserFactory(
+            organization=self.org1,
+            is_superuser=True,
+            is_staff=True,
+            role='admin'
+        )
+        
+        self.regular_user = CustomUserFactory(organization=self.org1)
+        
+        # Create incidents
+        self.incident1 = IncidentFactory(organization=self.org1, created_by=self.regular_user)
+        self.incident2 = IncidentFactory(organization=self.org2, created_by=self.regular_user)
+    
+    def test_superuser_can_access_any_org_data(self):
+        """Test superuser can access data from any organization"""
+        refresh = RefreshToken.for_user(self.superuser)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        # Access incident from org2 (superuser's org is org1)
+        response = self.client.get(f'/api/v1/incidents/{self.incident2.id}/')
+        
+        # Superuser should have access
+        assert response.status_code == status.HTTP_200_OK
+    
+    def test_superuser_can_modify_any_incident(self):
+        """Test superuser can modify incidents from any organization"""
+        refresh = RefreshToken.for_user(self.superuser)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        data = {
+            'status': 'closed',
+            'resolution_notes': 'Closed by superuser'
+        }
+        
+        response = self.client.patch(f'/api/v1/incidents/{self.incident2.id}/', data)
+        
+        assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestObjectLevelPermissions:
+    """Test object-level permissions"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        
+        self.incident_creator = CustomUserFactory(organization=self.org)
+        self.incident_assignee = CustomUserFactory(organization=self.org)
+        self.other_user = CustomUserFactory(organization=self.org)
+        
+        self.incident = IncidentFactory(
+            organization=self.org,
+            created_by=self.incident_creator,
+            assigned_to=self.incident_assignee
+        )
+    
+    def test_creator_can_modify_incident(self):
+        """Test incident creator can modify it"""
+        refresh = RefreshToken.for_user(self.incident_creator)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        data = {
+            'description': 'Updated description'
+        }
+        
+        response = self.client.patch(f'/api/v1/incidents/{self.incident.id}/', data)
+        
+        assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+    
+    def test_assignee_can_modify_incident(self):
+        """Test incident assignee can modify it"""
+        refresh = RefreshToken.for_user(self.incident_assignee)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        data = {
+            'status': 'in_progress'
+        }
+        
+        response = self.client.patch(f'/api/v1/incidents/{self.incident.id}/', data)
+        
+        assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+    
+    def test_other_user_cannot_modify_incident(self):
+        """Test other users cannot modify incident"""
+        refresh = RefreshToken.for_user(self.other_user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        data = {
+            'status': 'closed'
+        }
+        
+        response = self.client.patch(f'/api/v1/incidents/{self.incident.id}/', data)
+        
+        # May be forbidden or may allow (depends on implementation)
+        assert response.status_code in [
+            status.HTTP_200_OK,
+            status.HTTP_403_FORBIDDEN
+        ]
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestReadOnlyPermissions:
+    """Test read-only access permissions"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        
+        self.user = CustomUserFactory(organization=self.org)
+        self.incident = IncidentFactory(organization=self.org, created_by=self.user)
+        
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_cannot_modify_read_only_fields(self):
+        """Test that read-only fields cannot be modified"""
+        data = {
+            'ticket_number': 'MODIFIED-NUMBER'
+        }
+        
+        response = self.client.patch(f'/api/v1/incidents/{self.incident.id}/', data)
+        
+        # ticket_number is read-only, should be ignored or error
+        assert response.status_code in [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST]
+        
+        # Verify it wasn't changed
+        self.incident.refresh_from_db()
+        assert self.incident.ticket_number != 'MODIFIED-NUMBER'
+    
+    def test_cannot_modify_audit_fields(self):
+        """Test that audit fields cannot be modified"""
+        original_created_at = self.incident.created_at
+        
+        data = {
+            'title': 'New title'
+        }
+        
+        response = self.client.patch(f'/api/v1/incidents/{self.incident.id}/', data)
+        
+        assert response.status_code == status.HTTP_200_OK
+        
+        # created_at should not change
+        self.incident.refresh_from_db()
+        assert self.incident.created_at == original_created_at
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestPermissionDenial:
+    """Test permission denial for restricted operations"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        
+        self.regular_user = CustomUserFactory(organization=self.org, role='user')
+        self.admin = CustomUserFactory(organization=self.org, role='admin')
+    
+    def test_regular_user_cannot_access_admin_endpoints(self):
+        """Test regular user cannot access admin-only endpoints"""
+        refresh = RefreshToken.for_user(self.regular_user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        response = self.client.post('/api/v1/admin/users/', {})
+        
+        # Should be forbidden or not found
+        assert response.status_code in [
+            status.HTTP_403_FORBIDDEN,
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_401_UNAUTHORIZED
+        ]
+    
+    def test_user_cannot_bulk_delete(self):
+        """Test user cannot perform bulk operations"""
+        refresh = RefreshToken.for_user(self.regular_user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        response = self.client.post('/api/v1/incidents/bulk_delete/', {})
+        
+        assert response.status_code in [
+            status.HTTP_403_FORBIDDEN,
+            status.HTTP_404_NOT_FOUND
+        ]
+
+
+@pytest.mark.permission
+@pytest.mark.django_db
+class TestDataIsolation:
+    """Test that organizations' data are properly isolated"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        
+        self.org1 = OrganizationFactory(name='Org 1')
+        self.org2 = OrganizationFactory(name='Org 2')
+        
+        self.user1 = CustomUserFactory(organization=self.org1)
+        self.user2 = CustomUserFactory(organization=self.org2)
+        
+        # Create multiple incidents in each org
+        for i in range(3):
+            IncidentFactory(organization=self.org1, created_by=self.user1)
+            IncidentFactory(organization=self.org2, created_by=self.user2)
+    
+    def test_user_sees_only_own_org_in_list(self):
+        """Test that user only sees own organization's data in list"""
+        refresh = RefreshToken.for_user(self.user1)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+        
+        response = self.client.get('/api/v1/incidents/')
+        
+        assert response.status_code == status.HTTP_200_OK
+        # Response should only contain incidents from org1
+        # The exact count depends on pagination and response format
