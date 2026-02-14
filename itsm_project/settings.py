@@ -7,6 +7,7 @@ from pathlib import Path
 from datetime import timedelta
 from celery.schedules import crontab
 from dotenv import load_dotenv
+from typing import Optional
 
 # Load environment variables from .env or .env.production
 BASE_DIR = Path(__file__).resolve().parent.parent
@@ -23,9 +24,30 @@ SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-change-this-in-production'
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
 ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
 
+SENTRY_DSN: Optional[str] = os.getenv('SENTRY_DSN')
+SENTRY_RELEASE: Optional[str] = os.getenv('SENTRY_RELEASE')
+SENTRY_TRACES_SAMPLE_RATE = float(os.getenv('SENTRY_TRACES_SAMPLE_RATE', '0.0'))
+
 # Detect test runs to avoid enforcing production-only security during tests
 TESTING = 'test' in os.sys.argv
 IS_PRODUCTION = ENVIRONMENT == 'production' and not DEBUG and not TESTING
+
+if SENTRY_DSN:
+    try:
+        import sentry_sdk
+        from sentry_sdk.integrations.django import DjangoIntegration
+        from sentry_sdk.utils import BadDsn
+
+        sentry_sdk.init(
+            dsn=SENTRY_DSN,
+            environment=ENVIRONMENT,
+            release=SENTRY_RELEASE,
+            integrations=[DjangoIntegration()],
+            traces_sample_rate=SENTRY_TRACES_SAMPLE_RATE,
+            send_default_pii=False,
+        )
+    except BadDsn:
+        SENTRY_DSN = None
 
 ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver').split(',')]
 
@@ -50,6 +72,7 @@ INSTALLED_APPS = [
     # Third-party apps
     'rest_framework',
     'rest_framework_simplejwt',
+    'rest_framework_simplejwt.token_blacklist',
     'corsheaders',
     'django_filters',
     'drf_yasg',
@@ -89,6 +112,7 @@ MIDDLEWARE = [
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
     'apps.core.middleware.CurrentUserMiddleware',
+    'apps.core.middleware.RequestIdMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'apps.core.middleware.RequestLoggingMiddleware',
@@ -315,6 +339,9 @@ LOGGING = {
     'version': 1,
     'disable_existing_loggers': False,
     'formatters': {
+        'json': {
+            '()': 'apps.core.logging.JsonFormatter',
+        },
         'verbose': {
             'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
             'style': '{',
@@ -331,12 +358,16 @@ LOGGING = {
         'require_debug_false': {
             '()': 'django.utils.log.RequireDebugFalse',
         },
+        'request_id': {
+            '()': 'apps.core.logging.RequestIdFilter',
+        },
     },
     'handlers': {
         'console': {
             'level': 'INFO',
             'class': 'logging.StreamHandler',
-            'formatter': 'simple',
+            'formatter': 'json',
+            'filters': ['request_id'],
         },
         'file': {
             'level': 'INFO',
@@ -344,7 +375,8 @@ LOGGING = {
             'filename': BASE_DIR / 'logs' / 'itsm.log',
             'maxBytes': 1024 * 1024 * 10,  # 10MB
             'backupCount': 5,
-            'formatter': 'verbose',
+            'formatter': 'json',
+            'filters': ['request_id'],
         },
         'security_file': {
             'level': 'WARNING',
@@ -352,7 +384,8 @@ LOGGING = {
             'filename': BASE_DIR / 'logs' / 'security.log',
             'maxBytes': 1024 * 1024 * 10,
             'backupCount': 3,
-            'formatter': 'verbose',
+            'formatter': 'json',
+            'filters': ['request_id'],
         },
     },
     'loggers': {

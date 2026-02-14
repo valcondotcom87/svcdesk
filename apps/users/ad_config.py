@@ -1,12 +1,30 @@
 """
 Active Directory Configuration Model
 """
+from django.conf import settings
 from django.db import models
-from apps.core.models import TimeStampedModel, AuditModel
 
 
-class ADConfiguration(AuditModel):
+class ADConfiguration(models.Model):
     """Active Directory sync configuration"""
+
+    created_at = models.DateTimeField(auto_now_add=True, db_index=True)
+    updated_at = models.DateTimeField(auto_now=True)
+    deleted_at = models.DateTimeField(null=True, blank=True, db_index=True)
+    created_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='%(class)s_created'
+    )
+    updated_by = models.ForeignKey(
+        settings.AUTH_USER_MODEL,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='%(class)s_updated'
+    )
     
     organization = models.OneToOneField(
         'organizations.Organization',
@@ -80,6 +98,7 @@ class ADConfiguration(AuditModel):
     # Group Mapping
     group_base = models.CharField(
         max_length=255,
+        null=True,
         blank=True,
         help_text="Base DN for group search (e.g., OU=Groups,DC=company,DC=com)"
     )
@@ -125,6 +144,7 @@ class ADConfiguration(AuditModel):
     )
     last_sync_error = models.TextField(
         blank=True,
+        null=True,
         help_text="Error message from last sync (if failed)"
     )
     

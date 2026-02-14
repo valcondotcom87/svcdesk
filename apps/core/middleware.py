@@ -2,6 +2,7 @@
 Core Middleware
 """
 import logging
+import uuid
 from threading import local
 from django.utils.deprecation import MiddlewareMixin
 
@@ -11,6 +12,10 @@ _thread_locals = local()
 
 def get_current_request():
     return getattr(_thread_locals, 'request', None)
+
+
+def get_request_id():
+    return getattr(_thread_locals, 'request_id', None)
 
 
 def get_current_user():
@@ -32,12 +37,32 @@ class CurrentUserMiddleware(MiddlewareMixin):
     def process_response(self, request, response):
         if hasattr(_thread_locals, 'request'):
             del _thread_locals.request
+        if hasattr(_thread_locals, 'request_id'):
+            del _thread_locals.request_id
         return response
 
     def process_exception(self, request, exception):
         if hasattr(_thread_locals, 'request'):
             del _thread_locals.request
+        if hasattr(_thread_locals, 'request_id'):
+            del _thread_locals.request_id
         return None
+
+
+class RequestIdMiddleware(MiddlewareMixin):
+    """Attach a request id to each request for traceability."""
+
+    def process_request(self, request):
+        request_id = request.headers.get('X-Request-ID') or str(uuid.uuid4())
+        _thread_locals.request_id = request_id
+        request.request_id = request_id
+        return None
+
+    def process_response(self, request, response):
+        request_id = getattr(request, 'request_id', None) or get_request_id()
+        if request_id:
+            response['X-Request-ID'] = request_id
+        return response
 
 
 class RequestLoggingMiddleware(MiddlewareMixin):
@@ -49,9 +74,15 @@ class RequestLoggingMiddleware(MiddlewareMixin):
         """
         Log request details
         """
+        request_id = getattr(request, 'request_id', None) or get_request_id()
         logger.info(
-            f"Request: {request.method} {request.path} "
-            f"from {request.META.get('REMOTE_ADDR')}"
+            "Request received",
+            extra={
+                'request_id': request_id,
+                'method': request.method,
+                'path': request.path,
+                'remote_addr': request.META.get('REMOTE_ADDR'),
+            }
         )
         return None
     
@@ -59,9 +90,15 @@ class RequestLoggingMiddleware(MiddlewareMixin):
         """
         Log response status
         """
+        request_id = getattr(request, 'request_id', None) or get_request_id()
         logger.info(
-            f"Response: {request.method} {request.path} "
-            f"Status: {response.status_code}"
+            "Response sent",
+            extra={
+                'request_id': request_id,
+                'method': request.method,
+                'path': request.path,
+                'status_code': response.status_code,
+            }
         )
         return response
 
