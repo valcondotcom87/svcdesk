@@ -3,7 +3,7 @@ Users Serializers
 """
 from rest_framework import serializers
 from django.contrib.auth.password_validation import validate_password
-from .models import User, Organization, Team, TeamMember, Role, UserRole
+from .models import User, Organization, Team, TeamMember, Role, UserRole, ADSyncLog
 
 
 class OrganizationSerializer(serializers.ModelSerializer):
@@ -200,3 +200,17 @@ class UserRoleSerializer(serializers.ModelSerializer):
             'assigned_at', 'assigned_by', 'assigned_by_name'
         ]
         read_only_fields = ['id', 'assigned_at']
+
+
+class ADSyncLogSerializer(serializers.ModelSerializer):
+    """Serializer for AD sync history"""
+    triggered_by_name = serializers.CharField(source='triggered_by.get_full_name', read_only=True)
+
+    class Meta:
+        model = ADSyncLog
+        fields = [
+            'id', 'started_at', 'completed_at', 'status',
+            'created_count', 'updated_count', 'skipped_count',
+            'error_message', 'source', 'triggered_by', 'triggered_by_name'
+        ]
+        read_only_fields = ['id', 'started_at', 'completed_at']

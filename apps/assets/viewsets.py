@@ -5,6 +5,8 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import ValidationError
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.assets.models import (
@@ -15,6 +17,8 @@ from apps.assets.serializers import (
     AssetCreateUpdateSerializer, AssetDepreciationSerializer,
     AssetMaintenanceSerializer, AssetTransferSerializer
 )
+from apps.organizations.models import Organization
+from apps.users.models import User
 
 
 class AssetCategoryViewSet(viewsets.ReadOnlyModelViewSet):
@@ -48,12 +52,26 @@ class AssetViewSet(viewsets.ModelViewSet):
         """Filter by user's organization"""
         user = self.request.user
         if user.is_superuser:
-            return Asset.objects.filter(is_deleted=False)
-        return Asset.objects.filter(organization_id=user.organization_id, is_deleted=False)
+            return Asset.objects.filter(deleted_at__isnull=True)
+        return Asset.objects.filter(organization_id=user.organization_id, deleted_at__isnull=True)
     
     def perform_create(self, serializer):
         """Set organization"""
-        serializer.save(organization=self.request.user.organization)
+        organization = self._resolve_organization()
+        if not organization:
+            raise ValidationError({'organization': 'User does not belong to an organization.'})
+        serializer.save(organization=organization)
+
+    def _resolve_organization(self):
+        user = self.request.user
+        user_org = getattr(user, 'organization', None)
+        if user_org:
+            matched = Organization.objects.filter(name=user_org.name).first()
+            if matched:
+                return matched
+        if user.is_superuser:
+            return Organization.objects.filter(is_active=True).first()
+        return None
     
     @action(detail=True, methods=['post'])
     def transfer(self, request, pk=None):
@@ -63,8 +81,7 @@ class AssetViewSet(viewsets.ModelViewSet):
         transfer_notes = request.data.get('transfer_notes', '')
         
         try:
-            from apps.core.models import CustomUser
-            to_user = CustomUser.objects.get(id=to_user_id)
+            to_user = User.objects.get(id=to_user_id)
             
             transfer = AssetTransfer.objects.create(
                 asset=asset,
@@ -79,7 +96,7 @@ class AssetViewSet(viewsets.ModelViewSet):
             
             serializer = AssetTransferSerializer(transfer)
             return Response(serializer.data)
-        except CustomUser.DoesNotExist:
+        except User.DoesNotExist:
             return Response({'error': 'User not found'}, status=status.HTTP_404_NOT_FOUND)
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)

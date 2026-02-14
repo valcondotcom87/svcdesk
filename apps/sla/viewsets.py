@@ -1,7 +1,7 @@
 """
 SLA ViewSets - REST API viewsets for SLA management
 """
-from rest_framework import viewsets, status, filters
+from rest_framework import viewsets, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
@@ -10,8 +10,8 @@ from django_filters.rest_framework import DjangoFilterBackend
 from apps.sla.models import SLAPolicy, SLATarget, SLABreach, SLAEscalation, SLAMetric
 from apps.sla.serializers import (
     SLAPolicyListSerializer, SLAPolicyDetailSerializer,
-    SLAPolicyCreateUpdateSerializer, SLATargetSerializer,
-    SLABreachSerializer, SLAEscalationSerializer, SLAMetricSerializer
+    SLAPolicyCreateUpdateSerializer,
+    SLATargetSerializer, SLABreachSerializer, SLAEscalationSerializer, SLAMetricSerializer
 )
 
 
@@ -20,7 +20,7 @@ class SLAPolicyViewSet(viewsets.ModelViewSet):
     queryset = SLAPolicy.objects.filter(is_active=True)
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['organization', 'service', 'coverage_type']
+    filterset_fields = ['organization', 'service', 'coverage']
     search_fields = ['name', 'description']
     ordering = ['name']
     
@@ -38,15 +38,22 @@ class SLAPolicyViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return SLAPolicy.objects.filter(is_active=True)
         return SLAPolicy.objects.filter(organization_id=user.organization_id, is_active=True)
+
+    def perform_create(self, serializer):
+        """Set organization when creating an SLA policy"""
+        if self.request.user.organization:
+            serializer.save(organization=self.request.user.organization)
+        else:
+            serializer.save()
     
     @action(detail=True, methods=['get'])
     def targets(self, request, pk=None):
         """Get all targets for an SLA policy"""
         policy = self.get_object()
-        targets = policy.slatarget_set.all()
+        targets = policy.targets.all()
         serializer = SLATargetSerializer(targets, many=True)
         return Response(serializer.data)
-    
+
     @action(detail=True, methods=['get'])
     def breaches(self, request, pk=None):
         """Get all breaches for an SLA policy"""
@@ -72,7 +79,7 @@ class SLABreachViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = SLABreachSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['sla_policy', 'breach_type']
+    filterset_fields = ['sla_policy', 'breach_type', 'is_acknowledged']
     ordering = ['-breached_at']
 
 
@@ -82,8 +89,8 @@ class SLAEscalationViewSet(viewsets.ModelViewSet):
     serializer_class = SLAEscalationSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['sla_policy', 'escalation_level']
-    ordering = ['escalation_level']
+    filterset_fields = ['sla_policy', 'level']
+    ordering = ['level']
 
 
 class SLAMetricViewSet(viewsets.ReadOnlyModelViewSet):
@@ -92,5 +99,5 @@ class SLAMetricViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = SLAMetricSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
-    filterset_fields = ['sla_policy']
-    search_fields = ['metric_name']
+    filterset_fields = ['organization', 'year', 'month', 'is_compliant']
+    search_fields = []

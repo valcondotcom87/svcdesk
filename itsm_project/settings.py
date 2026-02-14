@@ -5,27 +5,35 @@ Django settings for ITSM project.
 import os
 from pathlib import Path
 from datetime import timedelta
+from celery.schedules import crontab
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv()
-
-# Build paths inside the project
+# Load environment variables from .env or .env.production
 BASE_DIR = Path(__file__).resolve().parent.parent
+env_file = BASE_DIR / '.env.production' if (BASE_DIR / '.env.production').exists() else BASE_DIR / '.env'
+load_dotenv(dotenv_path=env_file)
+
+# Also load from OS environment (set by Docker compose)
+# Note: os.getenv() will check both file-based and OS environment variables
 
 # SECURITY WARNING: keep the secret key used in production secret!
 SECRET_KEY = os.getenv('SECRET_KEY', 'django-insecure-change-this-in-production')
 
 # SECURITY WARNING: don't run with debug turned on in production!
 DEBUG = os.getenv('DEBUG', 'True') == 'True'
+ENVIRONMENT = os.getenv('ENVIRONMENT', 'development')
 
 # Detect test runs to avoid enforcing production-only security during tests
 TESTING = 'test' in os.sys.argv
+IS_PRODUCTION = ENVIRONMENT == 'production' and not DEBUG and not TESTING
 
-ALLOWED_HOSTS = os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver').split(',')
+ALLOWED_HOSTS = [h.strip() for h in os.getenv('ALLOWED_HOSTS', 'localhost,127.0.0.1,testserver').split(',')]
 
 # For development: ensure local origins are trusted for CSRF when using IP/host
-CSRF_TRUSTED_ORIGINS = os.getenv('CSRF_TRUSTED_ORIGINS', 'http://127.0.0.1,http://localhost').split(',')
+CSRF_TRUSTED_ORIGINS = [o.strip() for o in os.getenv(
+    'CSRF_TRUSTED_ORIGINS',
+    'http://127.0.0.1,http://localhost,http://127.0.0.1:4173,http://localhost:4173,http://127.0.0.1:5173,http://localhost:5173'
+).split(',')]
 
 # Disable APPEND_SLASH for REST API - prevents unwanted 301 redirects
 APPEND_SLASH = False
@@ -48,7 +56,6 @@ INSTALLED_APPS = [
     # 'drf_spectacular',  # Removed - causes schema generation errors
     'django_celery_beat',
     'django_celery_results',
-    'debug_toolbar',
     
     # Local apps
     'apps.core',
@@ -63,24 +70,33 @@ INSTALLED_APPS = [
     'apps.workflows',
     'apps.notifications',
     'apps.reports',
-    'apps.audit',
+    'apps.audit.apps.AuditConfig',
+    'apps.assets',
+    'apps.knowledge',
     'apps.compliance',  # Compliance Management Module (Phase 4)
 ]
 
+if DEBUG:
+    INSTALLED_APPS.append('debug_toolbar')
+
 MIDDLEWARE = [
+    'apps.core.cors_middleware.CORSOptionsMiddleware',  # Must be first to handle CORS
     'django.middleware.security.SecurityMiddleware',
     'whitenoise.middleware.WhiteNoiseMiddleware',
     'corsheaders.middleware.CorsMiddleware',
     'django.contrib.sessions.middleware.SessionMiddleware',
-    'debug_toolbar.middleware.DebugToolbarMiddleware',
     'django.middleware.common.CommonMiddleware',
     'django.middleware.csrf.CsrfViewMiddleware',
     'django.contrib.auth.middleware.AuthenticationMiddleware',
+    'apps.core.middleware.CurrentUserMiddleware',
     'django.contrib.messages.middleware.MessageMiddleware',
     'django.middleware.clickjacking.XFrameOptionsMiddleware',
     'apps.core.middleware.RequestLoggingMiddleware',
     'apps.core.middleware.TenantMiddleware',
 ]
+
+if DEBUG:
+    MIDDLEWARE.insert(4, 'debug_toolbar.middleware.DebugToolbarMiddleware')
 
 ROOT_URLCONF = 'itsm_project.urls'
 
@@ -127,6 +143,8 @@ else:
 # Custom User Model
 AUTH_USER_MODEL = 'users.User'
 
+PASSWORD_MIN_LENGTH = int(os.getenv('PASSWORD_MIN_LENGTH', '12'))
+
 # Password validation
 AUTH_PASSWORD_VALIDATORS = [
     {
@@ -135,7 +153,7 @@ AUTH_PASSWORD_VALIDATORS = [
     {
         'NAME': 'django.contrib.auth.password_validation.MinimumLengthValidator',
         'OPTIONS': {
-            'min_length': 12,
+            'min_length': PASSWORD_MIN_LENGTH,
         }
     },
     {
@@ -148,7 +166,7 @@ AUTH_PASSWORD_VALIDATORS = [
 
 # Internationalization
 LANGUAGE_CODE = 'en-us'
-TIME_ZONE = 'UTC'
+TIME_ZONE = os.getenv('TIMEZONE', 'UTC')
 USE_I18N = True
 USE_TZ = True
 
@@ -220,31 +238,18 @@ SIMPLE_JWT = {
 # CORS Settings
 CORS_ALLOWED_ORIGINS = os.getenv(
     'CORS_ALLOWED_ORIGINS',
-    'http://localhost:3000,http://127.0.0.1:3000'
+    'http://localhost:3000,http://127.0.0.1:3000,http://localhost:4173,http://127.0.0.1:4173,http://localhost:5173,http://127.0.0.1:5173'
 ).split(',')
+CORS_ALLOW_ALL_ORIGINS = DEBUG
 CORS_ALLOW_CREDENTIALS = True
 
 # Celery Configuration
-CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', 'redis://localhost:6379/0')
-CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://localhost:6379/0')
+CELERY_BROKER_URL = os.getenv('CELERY_BROKER_URL', os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
+CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
 CELERY_TIMEZONE = TIME_ZONE
-CELERY_BEAT_SCHEDULER = 'django_celery_beat.schedulers:DatabaseScheduler'
-
-# Redis Cache
-CACHES = {
-    'default': {
-        'BACKEND': 'django_redis.cache.RedisCache',
-        'LOCATION': os.getenv('REDIS_URL', 'redis://localhost:6379/0'),
-        'OPTIONS': {
-            'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-        },
-        'KEY_PREFIX': 'itsm',
-        'TIMEOUT': 300,
-    }
-}
 
 # Email Configuration
 EMAIL_BACKEND = os.getenv('EMAIL_BACKEND', 'django.core.mail.backends.console.EmailBackend')
@@ -255,77 +260,44 @@ EMAIL_HOST_USER = os.getenv('EMAIL_HOST_USER', '')
 EMAIL_HOST_PASSWORD = os.getenv('EMAIL_HOST_PASSWORD', '')
 DEFAULT_FROM_EMAIL = os.getenv('DEFAULT_FROM_EMAIL', 'noreply@itsm.com')
 
-# Logging
-LOGGING = {
-    'version': 1,
-    'disable_existing_loggers': False,
-    'formatters': {
-        'verbose': {
-            'format': '{levelname} {asctime} {module} {process:d} {thread:d} {message}',
-            'style': '{',
-        },
-        'simple': {
-            'format': '{levelname} {message}',
-            'style': '{',
-        },
-    },
-    'filters': {
-        'require_debug_true': {
-            '()': 'django.utils.log.RequireDebugTrue',
-        },
-    },
-    'handlers': {
-        'console': {
-            'level': 'INFO',
-            'class': 'logging.StreamHandler',
-            'formatter': 'simple'
-        },
-        'file': {
-            'level': 'INFO',
-            'class': 'logging.handlers.RotatingFileHandler',
-            'filename': BASE_DIR / 'logs' / 'itsm.log',
-            'maxBytes': 1024 * 1024 * 15,  # 15MB
-            'backupCount': 10,
-            'formatter': 'verbose',
-        },
-    },
-    'root': {
-        'handlers': ['console', 'file'],
-        'level': 'INFO',
-    },
-    'loggers': {
-        'django': {
-            'handlers': ['console', 'file'],
-            'level': os.getenv('DJANGO_LOG_LEVEL', 'INFO'),
-            'propagate': False,
-        },
-        'apps': {
-            'handlers': ['console', 'file'],
-            'level': 'INFO',
-            'propagate': False,
-        },
-    },
-}
-
 # Create logs directory if it doesn't exist
 os.makedirs(BASE_DIR / 'logs', exist_ok=True)
 
 # Security Settings - Only enforce in production (DEBUG=False and not testing)
-if not DEBUG and not TESTING:
-    SECURE_SSL_REDIRECT = True
-    SESSION_COOKIE_SECURE = True
-    CSRF_COOKIE_SECURE = True
+SECURE_PROXY_SSL_HEADER = ('HTTP_X_FORWARDED_PROTO', 'https')
+if IS_PRODUCTION:
+    SECURE_SSL_REDIRECT = os.getenv('SECURE_SSL_REDIRECT', 'True') == 'True'
+    SESSION_COOKIE_SECURE = os.getenv('SESSION_COOKIE_SECURE', 'True') == 'True'
+    CSRF_COOKIE_SECURE = os.getenv('CSRF_COOKIE_SECURE', 'True') == 'True'
     SECURE_BROWSER_XSS_FILTER = True
     SECURE_CONTENT_TYPE_NOSNIFF = True
-    SECURE_HSTS_SECONDS = 31536000
-    SECURE_HSTS_INCLUDE_SUBDOMAINS = True
-    SECURE_HSTS_PRELOAD = True
+    SECURE_HSTS_SECONDS = int(os.getenv('SECURE_HSTS_SECONDS', '31536000'))
+    SECURE_HSTS_INCLUDE_SUBDOMAINS = os.getenv('SECURE_HSTS_INCLUDE_SUBDOMAINS', 'True') == 'True'
+    SECURE_HSTS_PRELOAD = os.getenv('SECURE_HSTS_PRELOAD', 'True') == 'True'
+    SECURE_REFERRER_POLICY = os.getenv('SECURE_REFERRER_POLICY', 'strict-origin-when-cross-origin')
     X_FRAME_OPTIONS = 'DENY'
 else:
     # Development/Testing - allow HTTP and relax cookie security
     SECURE_SSL_REDIRECT = False
     SESSION_COOKIE_SECURE = False
     CSRF_COOKIE_SECURE = False
+
+# Auth & security hardening
+AUTH_MAX_FAILED_ATTEMPTS = int(os.getenv('AUTH_MAX_FAILED_ATTEMPTS', '5'))
+AUTH_LOCKOUT_MINUTES = int(os.getenv('AUTH_LOCKOUT_MINUTES', '30'))
+AUDIT_LOG_ENABLED = os.getenv('AUDIT_LOG_ENABLED', 'True') == 'True'
+AUDIT_LOG_RETENTION_DAYS = int(os.getenv('AUDIT_LOG_RETENTION_DAYS', '2555'))
+LOCKOUT_NOTIFY_ADMINS = os.getenv('LOCKOUT_NOTIFY_ADMINS', 'True') == 'True'
+MFA_REQUIRED_ROLES = [
+    role.strip()
+    for role in os.getenv('MFA_REQUIRED_ROLES', 'admin,manager').split(',')
+    if role.strip()
+]
+
+# Encryption hooks (implementation depends on infrastructure)
+ENCRYPTION_AT_REST_ENABLED = os.getenv('ENCRYPTION_AT_REST_ENABLED', 'False') == 'True'
+FIELD_ENCRYPTION_KEY = os.getenv('FIELD_ENCRYPTION_KEY', '')
+TLS_REQUIRED = os.getenv('TLS_REQUIRED', 'True') == 'True'
 
 # File Upload Settings
 MAX_UPLOAD_SIZE = int(os.getenv('MAX_UPLOAD_SIZE', 10485760))  # 10MB
@@ -394,6 +366,11 @@ LOGGING = {
             'level': 'WARNING',
             'propagate': False,
         },
+        'security': {
+            'handlers': ['security_file'],
+            'level': 'WARNING',
+            'propagate': False,
+        },
         'apps': {
             'handlers': ['console', 'file'],
             'level': 'DEBUG' if DEBUG else 'INFO',
@@ -401,6 +378,27 @@ LOGGING = {
         },
     },
 }
+
+LOG_FORWARDING_ENABLED = os.getenv('LOG_FORWARDING_ENABLED', 'False') == 'True'
+LOG_FORWARDING_HOST = os.getenv('LOG_FORWARDING_HOST', '')
+LOG_FORWARDING_PORT = int(os.getenv('LOG_FORWARDING_PORT', '514'))
+
+if LOG_FORWARDING_ENABLED and LOG_FORWARDING_HOST:
+    LOGGING['handlers']['syslog'] = {
+        'level': 'INFO',
+        'class': 'logging.handlers.SysLogHandler',
+        'address': (LOG_FORWARDING_HOST, LOG_FORWARDING_PORT),
+        'formatter': 'simple',
+    }
+    for logger_name in ['django', 'django.security', 'apps', 'security']:
+        logger_config = LOGGING['loggers'].setdefault(
+            logger_name,
+            {'handlers': [], 'level': 'INFO', 'propagate': False},
+        )
+        handlers = logger_config.get('handlers', [])
+        if 'syslog' not in handlers:
+            handlers.append('syslog')
+            logger_config['handlers'] = handlers
 
 # Cache Configuration
 CACHES = {
@@ -419,10 +417,12 @@ try:
             'LOCATION': REDIS_URL,
             'OPTIONS': {
                 'CLIENT_CLASS': 'django_redis.client.DefaultClient',
-            }
+            },
+            'KEY_PREFIX': 'itsm',
+            'TIMEOUT': 300,
         }
     }
-except:
+except Exception:
     pass  # Fall back to local memory cache
 
 # Session Configuration
@@ -430,7 +430,8 @@ SESSION_ENGINE = 'django.contrib.sessions.backends.cache'
 SESSION_CACHE_ALIAS = 'default'
 SESSION_COOKIE_AGE = 86400 * 7  # 7 days
 SESSION_COOKIE_HTTPONLY = True
-SESSION_COOKIE_SECURE = not DEBUG
+SESSION_COOKIE_SAMESITE = os.getenv('SESSION_COOKIE_SAMESITE', 'Lax')
+CSRF_COOKIE_SAMESITE = os.getenv('CSRF_COOKIE_SAMESITE', 'Lax')
 
 # API Documentation
 SPECTACULAR_SETTINGS = {
@@ -447,7 +448,14 @@ CELERY_RESULT_BACKEND = os.getenv('CELERY_RESULT_BACKEND', 'redis://127.0.0.1:63
 CELERY_ACCEPT_CONTENT = ['json']
 CELERY_TASK_SERIALIZER = 'json'
 CELERY_RESULT_SERIALIZER = 'json'
-CELERY_TIMEZONE = 'UTC'
+CELERY_TIMEZONE = TIME_ZONE
+
+CELERY_BEAT_SCHEDULE = {
+    'purge-audit-logs': {
+        'task': 'apps.audit.tasks.purge_audit_logs',
+        'schedule': crontab(hour=2, minute=30),
+    },
+}
 CELERY_TASK_TRACK_STARTED = True
 CELERY_TASK_TIME_LIMIT = 30 * 60  # 30 minutes
 

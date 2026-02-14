@@ -36,6 +36,9 @@ class Problem(AuditModel):
         ('closed', 'Closed'),
     ]
     status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='identified')
+
+    # Classification
+    category = models.CharField(max_length=100, blank=True)
     
     # Impact
     affected_users = models.IntegerField(default=0)

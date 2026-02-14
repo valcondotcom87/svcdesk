@@ -26,15 +26,15 @@ app.conf.beat_schedule = {
         'task': 'apps.sla.tasks.check_sla_breaches',
         'schedule': crontab(minute='*/5'),
     },
-    # Auto-escalate tickets every 10 minutes
-    'auto-escalate-tickets': {
-        'task': 'apps.tickets.tasks.auto_escalate_tickets',
-        'schedule': crontab(minute='*/10'),
-    },
     # Send SLA warning notifications every 15 minutes
     'send-sla-warnings': {
         'task': 'apps.sla.tasks.send_sla_warnings',
         'schedule': crontab(minute='*/15'),
+    },
+    # Auto-escalate overdue SLA items every 10 minutes
+    'auto-escalate-tickets': {
+        'task': 'apps.sla.tasks.auto_escalate_tickets',
+        'schedule': crontab(minute='*/10'),
     },
     # Generate daily reports at 6 AM
     'generate-daily-reports': {
@@ -45,11 +45,6 @@ app.conf.beat_schedule = {
     'cleanup-old-notifications': {
         'task': 'apps.notifications.tasks.cleanup_old_notifications',
         'schedule': crontab(hour=2, minute=0),
-    },
-    # Archive old tickets monthly on 1st at 3 AM
-    'archive-old-tickets': {
-        'task': 'apps.tickets.tasks.archive_old_tickets',
-        'schedule': crontab(day_of_month=1, hour=3, minute=0),
     },
 }
 

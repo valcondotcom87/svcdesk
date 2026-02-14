@@ -1,6 +1,8 @@
 """
 Authentication API - JWT authentication endpoints
 """
+import logging
+from datetime import timedelta
 from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -8,8 +10,123 @@ from rest_framework.response import Response
 from rest_framework_simplejwt.tokens import RefreshToken
 from rest_framework_simplejwt.views import TokenObtainPairView
 from rest_framework_simplejwt.serializers import TokenObtainPairSerializer
+from rest_framework.views import APIView
+from django.conf import settings
+from django.utils import timezone
+from django.contrib.auth.password_validation import validate_password
+from django.core.mail import send_mail
+from django.db.models import Q
 
 from apps.users.models import User
+from apps.audit.models import AuditLog
+from apps.notifications.models import Notification, NotificationTemplate
+
+
+security_logger = logging.getLogger('security')
+
+
+def _log_auth_event(user, request, action, status_value='success', error_message=''):
+    if not settings.AUDIT_LOG_ENABLED:
+        return
+    organization = getattr(user, 'organization', None)
+    if not organization:
+        return
+    try:
+        AuditLog.objects.create(
+            organization=organization,
+            user=user,
+            action=action,
+            entity_type='User',
+            entity_id=str(user.id),
+            ip_address=request.META.get('REMOTE_ADDR'),
+            user_agent=request.META.get('HTTP_USER_AGENT', ''),
+            status=status_value,
+            error_message=error_message or '',
+        )
+    except Exception as exc:
+        security_logger.warning('Audit log write failed: %s', exc)
+
+
+def _register_failed_login(user, request, reason):
+    user.failed_login_attempts += 1
+    if user.failed_login_attempts >= settings.AUTH_MAX_FAILED_ATTEMPTS:
+        user.locked_until = timezone.now() + timedelta(minutes=settings.AUTH_LOCKOUT_MINUTES)
+        user.save(update_fields=['failed_login_attempts', 'locked_until'])
+        _log_auth_event(user, request, 'login_locked', status_value='warning', error_message=reason)
+        _notify_admins_of_lockout(user, request, reason)
+    else:
+        user.save(update_fields=['failed_login_attempts'])
+        _log_auth_event(user, request, 'login_failed', status_value='failure', error_message=reason)
+
+
+def _notify_admins_of_lockout(user, request, reason):
+    if not settings.LOCKOUT_NOTIFY_ADMINS:
+        return
+    organization = getattr(user, 'organization', None)
+    if not organization:
+        return
+
+    admins = User.objects.filter(
+        Q(is_superuser=True) | Q(role='admin'),
+        organization=organization,
+        is_active=True,
+    )
+    if not admins.exists():
+        return
+
+    ip_address = request.META.get('REMOTE_ADDR')
+    context = {
+        'user_email': user.email,
+        'reason': reason,
+        'ip_address': ip_address,
+        'lockout_minutes': settings.AUTH_LOCKOUT_MINUTES,
+    }
+    default_subject = 'Security alert: account locked'
+    default_message = (
+        f"User account locked: {user.email}\n"
+        f"Reason: {reason}\n"
+        f"IP: {ip_address}\n"
+        f"Lockout duration: {settings.AUTH_LOCKOUT_MINUTES} minutes"
+    )
+
+    templates = NotificationTemplate.objects.filter(
+        organization=organization,
+        name='security_lockout',
+        is_active=True,
+    )
+    in_app_template = templates.filter(channel='in_app').first()
+    email_template = templates.filter(channel='email').first()
+
+    def render_template(value, fallback):
+        if not value:
+            return fallback
+        try:
+            return value.format(**context)
+        except Exception:
+            return fallback
+
+    for admin in admins:
+        Notification.objects.create(
+            organization=organization,
+            recipient=admin,
+            template=in_app_template,
+            channel='in_app',
+            subject=render_template(getattr(in_app_template, 'subject', ''), default_subject),
+            message=render_template(getattr(in_app_template, 'body', ''), default_message),
+            is_sent=True,
+            sent_at=timezone.now(),
+        )
+
+    try:
+        send_mail(
+            subject=render_template(getattr(email_template, 'subject', ''), default_subject),
+            message=render_template(getattr(email_template, 'body', ''), default_message),
+            from_email=settings.DEFAULT_FROM_EMAIL,
+            recipient_list=[admin.email for admin in admins],
+            fail_silently=True,
+        )
+    except Exception as exc:
+        security_logger.warning('Admin lockout email failed: %s', exc)
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -34,32 +151,140 @@ class CustomTokenObtainPairView(TokenObtainPairView):
     serializer_class = CustomTokenObtainPairSerializer
 
 
-@api_view(['POST'])
+class LoginView(APIView):
+    """
+    Class-based login view with proper CORS support
+    Handles both POST (login) and OPTIONS (CORS preflight) requests
+    """
+    permission_classes = [AllowAny]
+    
+    def options(self, request, *args, **kwargs):
+        """Handle CORS preflight requests"""
+        return Response(status=status.HTTP_200_OK)
+    
+    def post(self, request):
+        """
+        Login endpoint - returns access and refresh tokens
+        
+        Request:
+            {
+                "username": "user@example.com",
+                "password": "password123"
+            }
+        
+        Response:
+            {
+                "access": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
+                "user": {
+                    "id": 1,
+                    "username": "user@example.com",
+                    "email": "user@example.com",
+                    "first_name": "John",
+                    "last_name": "Doe",
+                    "organization_id": 1
+                }
+            }
+        """
+        username = request.data.get('username')
+        password = request.data.get('password')
+        
+        if not username or not password:
+            return Response({
+                'error': 'Username and password are required'
+            }, status=status.HTTP_400_BAD_REQUEST)
+        
+        try:
+            user = User.objects.get(email=username)
+        except User.DoesNotExist:
+            security_logger.warning('Login failed for unknown user: %s', username)
+            return Response({
+                'error': 'Invalid credentials'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        if user.is_locked():
+            _log_auth_event(user, request, 'login_blocked', status_value='warning', error_message='Account locked')
+            return Response({
+                'error': 'Account is locked. Please try again later.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        
+        if not user.check_password(password):
+            _register_failed_login(user, request, 'Invalid password')
+            return Response({
+                'error': 'Invalid credentials'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+        
+        if not user.is_active:
+            return Response({
+                'error': 'User account is inactive'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if user.role in settings.MFA_REQUIRED_ROLES and not user.mfa_enabled:
+            _log_auth_event(user, request, 'mfa_required', status_value='warning', error_message='MFA not enabled')
+            return Response({
+                'error': 'MFA is required for this role. Please enable MFA.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+        if user.mfa_enabled:
+            totp_code = request.data.get('totp_code')
+            if not totp_code:
+                _log_auth_event(user, request, 'mfa_missing', status_value='failure', error_message='MFA code missing')
+                return Response({
+                    'error': 'MFA code is required.'
+                }, status=status.HTTP_403_FORBIDDEN)
+            if not user.mfa_secret:
+                _log_auth_event(user, request, 'mfa_missing_secret', status_value='failure', error_message='MFA secret missing')
+                return Response({
+                    'error': 'MFA is not configured correctly.'
+                }, status=status.HTTP_403_FORBIDDEN)
+            import pyotp
+            totp = pyotp.TOTP(user.mfa_secret)
+            if not totp.verify(str(totp_code).strip()):
+                _log_auth_event(user, request, 'mfa_invalid', status_value='failure', error_message='Invalid MFA code')
+                return Response({
+                    'error': 'Invalid MFA code.'
+                }, status=status.HTTP_403_FORBIDDEN)
+
+        user.failed_login_attempts = 0
+        user.locked_until = None
+        user.last_login = timezone.now()
+        user.save(update_fields=['failed_login_attempts', 'locked_until', 'last_login'])
+        _log_auth_event(user, request, 'login_success')
+        
+        # Generate tokens
+        refresh = RefreshToken.for_user(user)
+        
+        # Add custom claims - convert UUID to string for JSON serialization
+        refresh['user_id'] = str(user.id)
+        refresh['organization_id'] = str(user.organization_id) if user.organization_id else None
+        
+        return Response({
+            'access': str(refresh.access_token),
+            'refresh': str(refresh),
+            'user': {
+                'id': str(user.id),
+                'username': user.username,
+                'email': user.email,
+                'first_name': user.first_name,
+                'last_name': user.last_name,
+                'organization_id': str(user.organization_id) if user.organization_id else None,
+                'is_staff': user.is_staff,
+                'is_superuser': user.is_superuser
+            }
+        }, status=status.HTTP_200_OK)
+
+
+# Keep the old function-based view for backward compatibility (to be deprecated)
+@api_view(['POST', 'OPTIONS'])
 @permission_classes([AllowAny])
 def login(request):
     """
+    Deprecated: Use LoginView instead
     Login endpoint - returns access and refresh tokens
-    
-    Request:
-        {
-            "username": "user@example.com",
-            "password": "password123"
-        }
-    
-    Response:
-        {
-            "access": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-            "refresh": "eyJ0eXAiOiJKV1QiLCJhbGc...",
-            "user": {
-                "id": 1,
-                "username": "user@example.com",
-                "email": "user@example.com",
-                "first_name": "John",
-                "last_name": "Doe",
-                "organization_id": 1
-            }
-        }
     """
+    if request.method == 'OPTIONS':
+        return Response(status=status.HTTP_200_OK)
+    
     username = request.data.get('username')
     password = request.data.get('password')
     
@@ -71,11 +296,19 @@ def login(request):
     try:
         user = User.objects.get(email=username)
     except User.DoesNotExist:
+        security_logger.warning('Login failed for unknown user: %s', username)
         return Response({
             'error': 'Invalid credentials'
         }, status=status.HTTP_401_UNAUTHORIZED)
+
+    if user.is_locked():
+        _log_auth_event(user, request, 'login_blocked', status_value='warning', error_message='Account locked')
+        return Response({
+            'error': 'Account is locked. Please try again later.'
+        }, status=status.HTTP_403_FORBIDDEN)
     
     if not user.check_password(password):
+        _register_failed_login(user, request, 'Invalid password')
         return Response({
             'error': 'Invalid credentials'
         }, status=status.HTTP_401_UNAUTHORIZED)
@@ -84,6 +317,38 @@ def login(request):
         return Response({
             'error': 'User account is inactive'
         }, status=status.HTTP_403_FORBIDDEN)
+
+    if user.role in settings.MFA_REQUIRED_ROLES and not user.mfa_enabled:
+        _log_auth_event(user, request, 'mfa_required', status_value='warning', error_message='MFA not enabled')
+        return Response({
+            'error': 'MFA is required for this role. Please enable MFA.'
+        }, status=status.HTTP_403_FORBIDDEN)
+
+    if user.mfa_enabled:
+        totp_code = request.data.get('totp_code')
+        if not totp_code:
+            _log_auth_event(user, request, 'mfa_missing', status_value='failure', error_message='MFA code missing')
+            return Response({
+                'error': 'MFA code is required.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        if not user.mfa_secret:
+            _log_auth_event(user, request, 'mfa_missing_secret', status_value='failure', error_message='MFA secret missing')
+            return Response({
+                'error': 'MFA is not configured correctly.'
+            }, status=status.HTTP_403_FORBIDDEN)
+        import pyotp
+        totp = pyotp.TOTP(user.mfa_secret)
+        if not totp.verify(str(totp_code).strip()):
+            _log_auth_event(user, request, 'mfa_invalid', status_value='failure', error_message='Invalid MFA code')
+            return Response({
+                'error': 'Invalid MFA code.'
+            }, status=status.HTTP_403_FORBIDDEN)
+
+    user.failed_login_attempts = 0
+    user.locked_until = None
+    user.last_login = timezone.now()
+    user.save(update_fields=['failed_login_attempts', 'locked_until', 'last_login'])
+    _log_auth_event(user, request, 'login_success')
     
     # Generate tokens
     refresh = RefreshToken.for_user(user)
@@ -203,17 +468,22 @@ def change_password(request):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     if not user.check_password(old_password):
+        _log_auth_event(user, request, 'password_change_failed', status_value='failure', error_message='Old password invalid')
         return Response({
             'error': 'Old password is incorrect'
         }, status=status.HTTP_400_BAD_REQUEST)
-    
-    if len(new_password) < 8:
+
+    try:
+        validate_password(new_password, user=user)
+    except Exception as exc:
         return Response({
-            'error': 'Password must be at least 8 characters'
+            'error': str(exc)
         }, status=status.HTTP_400_BAD_REQUEST)
     
     user.set_password(new_password)
-    user.save()
+    user.password_changed_at = timezone.now()
+    user.save(update_fields=['password', 'password_changed_at'])
+    _log_auth_event(user, request, 'password_changed')
     
     return Response({
         'detail': 'Password changed successfully'
@@ -313,6 +583,7 @@ def verify_mfa(request):
         totp = pyotp.TOTP(pending_secret)
         
         if not totp.verify(totp_code):
+            _log_auth_event(user, request, 'mfa_verify_failed', status_value='failure', error_message='Invalid TOTP')
             return Response({
                 'error': 'Invalid TOTP code'
             }, status=status.HTTP_400_BAD_REQUEST)
@@ -322,6 +593,8 @@ def verify_mfa(request):
         user.mfa_method = 'totp'
         user.mfa_secret = pending_secret
         user.save()
+
+        _log_auth_event(user, request, 'mfa_enabled')
         
         # Clean up session
         del request.session['pending_mfa_secret']
@@ -348,6 +621,7 @@ def disable_mfa(request):
         }, status=status.HTTP_400_BAD_REQUEST)
     
     if not user.check_password(password):
+        _log_auth_event(user, request, 'mfa_disable_failed', status_value='failure', error_message='Invalid password')
         return Response({
             'error': 'Invalid password'
         }, status=status.HTTP_401_UNAUTHORIZED)
@@ -356,7 +630,55 @@ def disable_mfa(request):
     user.mfa_method = None
     user.mfa_secret = None
     user.save()
+
+    _log_auth_event(user, request, 'mfa_disabled')
     
     return Response({
         'detail': 'MFA disabled successfully'
+    }, status=status.HTTP_200_OK)
+
+
+@api_view(['GET'])
+@permission_classes([IsAuthenticated])
+def profile(request):
+    """
+    Get current user profile
+    
+    Returns:
+        {
+            "id": "uuid",
+            "username": "user@example.com",
+            "email": "user@example.com",
+            "first_name": "John",
+            "last_name": "Doe",
+            "phone": "+1234567890",
+            "role": "agent",
+            "organization_id": "uuid",
+            "organization_name": "Acme Corp",
+            "is_active": true,
+            "is_staff": false,
+            "is_superuser": false,
+            "mfa_enabled": false,
+            "last_login": "2026-02-12T22:00:00Z",
+            "created_at": "2026-01-01T00:00:00Z"
+        }
+    """
+    user = request.user
+    
+    return Response({
+        'id': str(user.id),
+        'username': user.username,
+        'email': user.email,
+        'first_name': user.first_name,
+        'last_name': user.last_name,
+        'phone': user.phone,
+        'role': user.role,
+        'organization_id': str(user.organization_id) if user.organization_id else None,
+        'organization_name': user.organization.name if user.organization else None,
+        'is_active': user.is_active,
+        'is_staff': user.is_staff,
+        'is_superuser': user.is_superuser,
+        'mfa_enabled': user.mfa_enabled,
+        'last_login': user.last_login.isoformat() if user.last_login else None,
+        'created_at': user.created_at.isoformat() if user.created_at else None
     }, status=status.HTTP_200_OK)

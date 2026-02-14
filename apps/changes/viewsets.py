@@ -5,6 +5,9 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import ValidationError, PermissionDenied
+from django.db.models import Q
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.changes.models import (
@@ -15,6 +18,12 @@ from apps.changes.serializers import (
     ChangeActionSerializer, CABMemberSerializer, ChangeApprovalSerializer,
     ChangeImpactAnalysisSerializer, ChangeLogSerializer
 )
+from apps.organizations.models import Organization
+from apps.users.models import User
+from apps.workflows.utils import (
+    ensure_workflow_instance_for_change,
+    advance_workflow,
+)
 
 
 class ChangeViewSet(viewsets.ModelViewSet):
@@ -22,9 +31,9 @@ class ChangeViewSet(viewsets.ModelViewSet):
     queryset = Change.objects.filter(deleted_at__isnull=True)
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['status', 'change_type', 'priority', 'assigned_to']
-    search_fields = ['change_number', 'title']
-    ordering_fields = ['created_at', 'scheduled_start']
+    filterset_fields = ['status', 'change_type', 'impact_level', 'requester', 'implementation_owner', 'category']
+    search_fields = ['ticket_number', 'title']
+    ordering_fields = ['created_at', 'implementation_date', 'completed_date']
     ordering = ['-created_at']
     
     def get_serializer_class(self):
@@ -38,69 +47,155 @@ class ChangeViewSet(viewsets.ModelViewSet):
     def get_queryset(self):
         """Filter by user's organization"""
         user = self.request.user
+        queryset = Change.objects.filter(deleted_at__isnull=True)
+
         if user.is_superuser:
-            return Change.objects.filter(deleted_at__isnull=True)
-        return Change.objects.filter(organization_id=user.organization_id, deleted_at__isnull=True)
+            return queryset
+
+        queryset = queryset.filter(organization_id=user.organization_id)
+
+        if user.role == 'end_user':
+            return queryset.filter(Q(requester=user) | Q(created_by=user))
+
+        return queryset
+
+    def get_object(self):
+        change = super().get_object()
+        user = self.request.user
+
+        if not user.is_superuser and user.role == 'end_user':
+            if change.requester_id != user.id and change.created_by_id != user.id:
+                raise PermissionDenied('End users can only access their own changes.')
+
+        return change
     
     def perform_create(self, serializer):
         """Set organization and created_by"""
-        serializer.save(organization=self.request.user.organization, created_by=self.request.user)
+        organization = self._resolve_organization()
+        if not organization:
+            raise ValidationError({'organization': 'User does not belong to an organization.'})
+        requester = serializer.validated_data.get('requester') or self.request.user
+        change = serializer.save(organization=organization, requester=requester, created_by=self.request.user)
+        ensure_workflow_instance_for_change(change, user=self.request.user)
+
+    def _resolve_organization(self):
+        user = self.request.user
+        user_org = getattr(user, 'organization', None)
+        if user_org:
+            matched = Organization.objects.filter(name=user_org.name).first()
+            if matched:
+                return matched
+        if user.is_superuser:
+            return Organization.objects.filter(is_active=True).first()
+        return None
     
     @action(detail=True, methods=['post'])
     def submit(self, request, pk=None):
         """Submit a change for review"""
         change = self.get_object()
-        change.status = 'submitted'
-        change.save()
+        if change.status != 'draft':
+            return Response(
+                {'detail': 'Only draft changes can be submitted.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        managers = User.objects.filter(
+            organization_id=change.organization_id,
+            role='manager',
+            is_active=True
+        )
+        if not managers.exists() and not request.user.is_superuser:
+            raise ValidationError({'approvals': 'No manager available for approval.'})
+
+        change.status = 'pending_approval'
+        change.save(update_fields=['status'])
+
+        instance = ensure_workflow_instance_for_change(change, user=request.user)
+        advance_workflow(instance, status='submitted', user=request.user)
         
         ChangeLog.objects.create(
             change=change,
             action='submitted',
-            user=request.user,
+            created_by=request.user,
             description='Change submitted for CAB review'
         )
         
-        return Response({'detail': f'Change {change.change_number} submitted'})
+        return Response({'detail': f'Change {change.ticket_number} submitted'})
     
     @action(detail=True, methods=['post'])
     def approve(self, request, pk=None):
         """Approve a change"""
         change = self.get_object()
         comments = request.data.get('comments', '')
+
+        if change.status != 'pending_approval':
+            return Response(
+                {'detail': 'Change is not awaiting approval.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not request.user.is_superuser and request.user.role != 'manager':
+            return Response({'detail': 'Manager approval required.'}, status=status.HTTP_403_FORBIDDEN)
         
-        approval = ChangeApproval.objects.create(
+        cab_member, _ = CABMember.objects.get_or_create(
             change=change,
-            approver=request.user,
-            status='approved',
-            comments=comments
+            user=request.user,
+            defaults={'role': 'Member', 'is_mandatory': False}
+        )
+
+        ChangeApproval.objects.update_or_create(
+            change=change,
+            cab_member=cab_member,
+            defaults={
+                'status': 'approved',
+                'comments': comments,
+                'decided_at': timezone.now(),
+            },
         )
         
-        # Check if all approvals are done
-        pending = ChangeApproval.objects.filter(change=change, status='pending').count()
-        if pending == 0:
-            change.status = 'approved'
-            change.save()
+        change.status = 'approved'
+        change.save(update_fields=['status'])
         
         ChangeLog.objects.create(
             change=change,
             action='approved',
-            user=request.user,
+            created_by=request.user,
             description=f'Change approved by {request.user.get_full_name()}'
         )
         
-        return Response({'detail': f'Change {change.change_number} approved'})
+        instance = ensure_workflow_instance_for_change(change, user=request.user)
+        advance_workflow(instance, status='approved', user=request.user, notes=comments)
+
+        return Response({'detail': f'Change {change.ticket_number} approved'})
     
     @action(detail=True, methods=['post'])
     def reject(self, request, pk=None):
         """Reject a change"""
         change = self.get_object()
         comments = request.data.get('comments', '')
+
+        if change.status != 'pending_approval':
+            return Response(
+                {'detail': 'Change is not awaiting approval.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+
+        if not request.user.is_superuser and request.user.role != 'manager':
+            return Response({'detail': 'Manager approval required.'}, status=status.HTTP_403_FORBIDDEN)
         
-        ChangeApproval.objects.create(
+        cab_member, _ = CABMember.objects.get_or_create(
             change=change,
-            approver=request.user,
-            status='rejected',
-            comments=comments
+            user=request.user,
+            defaults={'role': 'Member', 'is_mandatory': False}
+        )
+
+        ChangeApproval.objects.update_or_create(
+            change=change,
+            cab_member=cab_member,
+            defaults={
+                'status': 'rejected',
+                'comments': comments,
+                'decided_at': timezone.now(),
+            },
         )
         
         change.status = 'rejected'
@@ -109,45 +204,63 @@ class ChangeViewSet(viewsets.ModelViewSet):
         ChangeLog.objects.create(
             change=change,
             action='rejected',
-            user=request.user,
+            created_by=request.user,
             description=f'Change rejected by {request.user.get_full_name()}'
         )
         
-        return Response({'detail': f'Change {change.change_number} rejected'})
+        instance = ensure_workflow_instance_for_change(change, user=request.user)
+        advance_workflow(instance, status='rejected', user=request.user, notes=comments)
+
+        return Response({'detail': f'Change {change.ticket_number} rejected'})
     
     @action(detail=True, methods=['post'])
     def implement(self, request, pk=None):
         """Implement a change"""
         change = self.get_object()
-        change.status = 'implementing'
-        change.actual_start = timezone.now()
+        if change.status != 'approved':
+            return Response(
+                {'detail': 'Only approved changes can be implemented.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
+        change.status = 'in_progress'
         change.save()
+
+        instance = ensure_workflow_instance_for_change(change, user=request.user)
+        advance_workflow(instance, status='in_progress', user=request.user)
         
         ChangeLog.objects.create(
             change=change,
             action='implementing',
-            user=request.user,
+            created_by=request.user,
             description='Change implementation started'
         )
         
-        return Response({'detail': f'Change {change.change_number} implementation started'})
+        return Response({'detail': f'Change {change.ticket_number} implementation started'})
     
     @action(detail=True, methods=['post'])
     def complete(self, request, pk=None):
         """Complete a change"""
         change = self.get_object()
+        if change.status != 'in_progress':
+            return Response(
+                {'detail': 'Change must be in progress before completion.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         change.status = 'completed'
-        change.actual_end = timezone.now()
+        change.completed_date = timezone.now()
         change.save()
+
+        instance = ensure_workflow_instance_for_change(change, user=request.user)
+        advance_workflow(instance, status='completed', user=request.user, complete=True)
         
         ChangeLog.objects.create(
             change=change,
             action='completed',
-            user=request.user,
+            created_by=request.user,
             description='Change implementation completed'
         )
         
-        return Response({'detail': f'Change {change.change_number} completed'})
+        return Response({'detail': f'Change {change.ticket_number} completed'})
 
 
 class CABMemberViewSet(viewsets.ModelViewSet):
@@ -166,8 +279,8 @@ class ChangeApprovalViewSet(viewsets.ReadOnlyModelViewSet):
     serializer_class = ChangeApprovalSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['change', 'approver', 'status']
-    ordering = ['approval_order']
+    filterset_fields = ['change', 'cab_member', 'status']
+    ordering = ['-created_at']
 
 
 class ChangeImpactAnalysisViewSet(viewsets.ModelViewSet):
@@ -176,8 +289,8 @@ class ChangeImpactAnalysisViewSet(viewsets.ModelViewSet):
     serializer_class = ChangeImpactAnalysisSerializer
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
-    filterset_fields = ['change', 'risk_level']
-    ordering = ['-analysis_date']
+    filterset_fields = ['change']
+    ordering = ['-created_at']
 
 
 class ChangeLogViewSet(viewsets.ReadOnlyModelViewSet):
@@ -187,4 +300,4 @@ class ChangeLogViewSet(viewsets.ReadOnlyModelViewSet):
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['change', 'action']
-    ordering = ['-timestamp']
+    ordering = ['-created_at']

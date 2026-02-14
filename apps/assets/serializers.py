@@ -16,7 +16,7 @@ class AssetCategorySerializer(serializers.ModelSerializer):
         fields = ['id', 'name', 'description', 'asset_count', 'is_active']
     
     def get_asset_count(self, obj):
-        return obj.asset_set.count()
+        return obj.assets.count()
 
 
 class AssetDepreciationSerializer(serializers.ModelSerializer):
@@ -63,8 +63,9 @@ class AssetListSerializer(serializers.ModelSerializer):
     class Meta:
         model = Asset
         fields = [
-            'id', 'asset_tag', 'name', 'category', 'category_name',
-            'status', 'status_display', 'current_owner', 'purchase_date'
+            'id', 'asset_tag', 'name', 'asset_type', 'category', 'category_name',
+            'status', 'status_display', 'lifecycle_stage', 'criticality',
+            'current_owner', 'purchase_date'
         ]
 
 
@@ -83,10 +84,16 @@ class AssetDetailSerializer(serializers.ModelSerializer):
         model = Asset
         fields = [
             'id', 'organization', 'asset_tag', 'name', 'description',
-            'category', 'category_name', 'status', 'status_display',
-            'current_owner', 'owner_name', 'location', 'purchase_date',
-            'cost', 'warranty_expires', 'depreciation', 'maintenance', 'transfers',
-            'created_at', 'updated_at'
+            'asset_type', 'category', 'category_name', 'status', 'status_display',
+            'lifecycle_stage', 'criticality', 'current_owner', 'owner_name',
+            'business_owner', 'technical_owner', 'location', 'related_service',
+            'purchase_date', 'cost', 'warranty_expires', 'serial_number',
+            'system_name', 'data_classification', 'confidentiality_impact',
+            'integrity_impact', 'availability_impact', 'fips_impact_level',
+            'risk_level', 'recovery_priority', 'business_value',
+            'authorization_boundary', 'dependencies', 'compliance_tags',
+            'csf_function', 'csf_category', 'iso_control', 'nist_control',
+            'depreciation', 'maintenance', 'transfers', 'created_at', 'updated_at'
         ]
         read_only_fields = ['created_at', 'updated_at']
 
@@ -96,6 +103,13 @@ class AssetCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = Asset
         fields = [
-            'name', 'description', 'category', 'current_owner', 'location',
-            'purchase_date', 'cost', 'warranty_expires'
+            'name', 'description', 'asset_type', 'category', 'status',
+            'lifecycle_stage', 'criticality', 'current_owner', 'business_owner',
+            'technical_owner', 'location', 'related_service', 'purchase_date',
+            'cost', 'warranty_expires', 'serial_number', 'system_name',
+            'data_classification', 'confidentiality_impact', 'integrity_impact',
+            'availability_impact', 'fips_impact_level', 'risk_level',
+            'recovery_priority', 'business_value', 'authorization_boundary',
+            'dependencies', 'compliance_tags', 'csf_function', 'csf_category',
+            'iso_control', 'nist_control'
         ]

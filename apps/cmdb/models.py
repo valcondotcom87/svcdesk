@@ -68,6 +68,9 @@ class ConfigurationItem(AuditModel):
     version = models.CharField(max_length=100, blank=True)
     serial_number = models.CharField(max_length=255, blank=True)
     manufacturer = models.CharField(max_length=255, blank=True)
+
+    # Impact analysis
+    impact_analysis = models.TextField(blank=True)
     
     # Location
     location = models.CharField(max_length=255, blank=True)

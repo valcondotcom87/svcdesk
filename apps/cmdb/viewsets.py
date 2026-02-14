@@ -8,13 +8,14 @@ from rest_framework.permissions import IsAuthenticated
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.cmdb.models import CICategory, ConfigurationItem as CI, CIAttribute, CIRelationship
+from apps.organizations.models import Organization
 from apps.cmdb.serializers import (
     CICategorySerializer, CIListSerializer, CIDetailSerializer,
     CICreateUpdateSerializer, CIAttributeSerializer, CIRelationshipSerializer
 )
 
 
-class CICategoryViewSet(viewsets.ReadOnlyModelViewSet):
+class CICategoryViewSet(viewsets.ModelViewSet):
     """ViewSet for CI categories"""
     queryset = CICategory.objects.all()
     serializer_class = CICategorySerializer
@@ -22,6 +23,13 @@ class CICategoryViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name']
     ordering = ['name']
+
+    def perform_create(self, serializer):
+        """Set organization when creating a CI category"""
+        if self.request.user.organization:
+            serializer.save(organization=self.request.user.organization)
+        else:
+            serializer.save()
 
 
 class CIViewSet(viewsets.ModelViewSet):
@@ -48,6 +56,17 @@ class CIViewSet(viewsets.ModelViewSet):
         if user.is_superuser:
             return CI.objects.all()
         return CI.objects.filter(organization_id=user.organization_id, deleted_at__isnull=True)
+
+    def perform_create(self, serializer):
+        """Set organization and created_by when creating a CI"""
+        user = self.request.user
+        organization = user.organization if hasattr(user, 'organization') else None
+        if user.is_superuser and not organization:
+            organization = Organization.objects.filter(is_active=True).first()
+        serializer.save(
+            organization=organization,
+            created_by=user
+        )
     
     @action(detail=True, methods=['post'])
     def add_attribute(self, request, pk=None):
@@ -122,3 +141,10 @@ class CIRelationshipViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['source_ci', 'target_ci', 'relationship_type']
     ordering = ['id']
+
+    def perform_create(self, serializer):
+        user = self.request.user
+        organization = user.organization if hasattr(user, 'organization') else None
+        if user.is_superuser and not organization:
+            organization = Organization.objects.filter(is_active=True).first()
+        serializer.save(organization=organization)

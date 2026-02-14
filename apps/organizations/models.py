@@ -2,7 +2,7 @@
 Organizations Models - Multi-tenancy foundation
 """
 from django.db import models
-from apps.core.models import TimeStampedModel, SoftDeleteModel, AuditModel
+from apps.core.models import TimeStampedModel, SoftDeleteModel, AuditModel, UUIDModel
 
 
 class Organization(TimeStampedModel):
@@ -76,6 +76,36 @@ class Department(TimeStampedModel):
         return self.name
 
 
+class DepartmentMember(UUIDModel):
+    """Department membership model"""
+    ROLE_CHOICES = [
+        ('member', 'Member'),
+        ('lead', 'Department Lead'),
+    ]
+
+    department = models.ForeignKey(
+        Department,
+        on_delete=models.CASCADE,
+        related_name='members'
+    )
+    user = models.ForeignKey(
+        'users.User',
+        on_delete=models.CASCADE,
+        related_name='department_memberships'
+    )
+    role = models.CharField(max_length=50, choices=ROLE_CHOICES, default='member')
+    joined_at = models.DateTimeField(auto_now_add=True)
+
+    class Meta:
+        unique_together = ['department', 'user']
+        indexes = [
+            models.Index(fields=['department', 'role']),
+        ]
+
+    def __str__(self):
+        return f"{self.user.get_full_name()} - {self.department.name}"
+
+
 class Team(TimeStampedModel):
     """Teams within departments"""
     organization = models.ForeignKey(
@@ -106,3 +136,36 @@ class Team(TimeStampedModel):
     
     def __str__(self):
         return f"{self.name} ({self.organization.name})"
+
+
+class ModuleCategory(TimeStampedModel):
+    """Configurable categories per module and organization."""
+
+    MODULE_CHOICES = [
+        ('incidents', 'Incidents'),
+        ('service_requests', 'Service Requests'),
+        ('problems', 'Problems'),
+        ('changes', 'Changes'),
+        ('assets', 'Assets'),
+    ]
+
+    organization = models.ForeignKey(
+        Organization,
+        on_delete=models.CASCADE,
+        related_name='module_categories'
+    )
+    module = models.CharField(max_length=50, choices=MODULE_CHOICES)
+    name = models.CharField(max_length=255)
+    description = models.TextField(blank=True)
+    is_active = models.BooleanField(default=True)
+    sort_order = models.IntegerField(default=0)
+
+    class Meta:
+        unique_together = ['organization', 'module', 'name']
+        ordering = ['sort_order', 'name']
+        indexes = [
+            models.Index(fields=['organization', 'module', 'is_active']),
+        ]
+
+    def __str__(self):
+        return f"{self.module}:{self.name}"

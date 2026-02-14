@@ -32,8 +32,11 @@ def log_user_changes(sender, instance, created, **kwargs):
 @receiver(post_delete, sender=User)
 def log_user_deletion(sender, instance, **kwargs):
     """Auto-log user deletion"""
+    system_user = User.objects.filter(is_superuser=True).first()
+    if not system_user:
+        return
     ImmutableAuditLog.log_action(
-        user=None,  # User deleted, so no user reference
+        user=system_user,
         action='delete',
         content_type=ContentType.objects.get_for_model(User),
         object_id=instance.id,
@@ -74,8 +77,11 @@ def log_incident_changes(sender, instance, created, **kwargs):
 @receiver(post_delete, sender=Incident)
 def log_incident_deletion(sender, instance, **kwargs):
     """Auto-log incident deletion"""
+    system_user = User.objects.filter(is_superuser=True).first()
+    if not system_user:
+        return
     ImmutableAuditLog.log_action(
-        user=None,
+        user=system_user,
         action='delete',
         content_type=ContentType.objects.get_for_model(Incident),
         object_id=instance.id,

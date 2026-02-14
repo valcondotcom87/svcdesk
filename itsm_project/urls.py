@@ -70,9 +70,6 @@ urlpatterns = [
         # Root endpoint
         path('', views.api_root, name='api-root'),
         
-        # User Management (Users, Teams, Organizations, Roles)
-        path('', include('apps.users.urls')),
-        
         # Core modules
         path('organizations/', include('apps.organizations.urls')),
         path('incidents/', include('apps.incidents.urls')),
@@ -80,11 +77,16 @@ urlpatterns = [
         path('problems/', include('apps.problems.urls')),
         path('changes/', include('apps.changes.urls')),
         path('cmdb/', include('apps.cmdb.urls')),
-        # path('sla/', include('apps.sla.urls')),
-        # path('workflows/', include('apps.workflows.urls')),
+        path('assets/', include('apps.assets.urls')),
+        path('sla/', include('apps.sla.urls')),
+        path('knowledge/', include('apps.knowledge.urls')),
+        
+        # User Management (Users, Teams, Organizations, Roles)
+        path('', include('apps.users.urls')),
+        path('workflows/', include('apps.workflows.urls')),
         # path('notifications/', include('apps.notifications.urls')),
         # path('reports/', include('apps.reports.urls')),
-        # path('audit/', include('apps.audit.urls')),
+        path('audit/', include('apps.audit.urls')),
         path('compliance/', include('apps.compliance.urls')),  # Compliance Module (Phase 4)
         
         # Health check

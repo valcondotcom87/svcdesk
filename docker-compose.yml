@@ -1,5 +1,3 @@
-version: '3.9'
-
 services:
   # PostgreSQL Database
   postgres:
@@ -65,10 +63,14 @@ services:
     restart: always
     command: >
       sh -c "python manage.py migrate --noinput && 
-             gunicorn config.wsgi:application --bind 0.0.0.0:8000 --workers 4 --worker-class sync --access-logfile - --error-logfile -"
+             gunicorn itsm_project.wsgi:application --bind 0.0.0.0:8000 --workers 4 --worker-class sync --access-logfile - --error-logfile -"
     environment:
       DEBUG: ${DEBUG:-False}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      SECURE_SSL_REDIRECT: ${SECURE_SSL_REDIRECT:-False}
+      SESSION_COOKIE_SECURE: ${SESSION_COOKIE_SECURE:-False}
+      CSRF_COOKIE_SECURE: ${CSRF_COOKIE_SECURE:-False}
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:${DB_PORT:-5432}/${DB_NAME:-itsm_db}
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: ${DB_NAME:-itsm_db}
       DB_USER: ${DB_USER:-postgres}
@@ -92,7 +94,7 @@ services:
     networks:
       - itsm-network
     healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8000/api/health/"]
+      test: ["CMD", "curl", "-f", "http://localhost:8000/api/v1/health/"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -110,10 +112,11 @@ services:
       dockerfile: Dockerfile
     container_name: itsm-celery
     restart: always
-    command: celery -A config worker -l info --concurrency=4
+    command: celery -A itsm_project worker -l info --concurrency=4
     environment:
       DEBUG: ${DEBUG:-False}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:${DB_PORT:-5432}/${DB_NAME:-itsm_db}
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: ${DB_NAME:-itsm_db}
       DB_USER: ${DB_USER:-postgres}
@@ -134,6 +137,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      disable: true
 
   # Celery Beat for Scheduled Tasks
   celery-beat:
@@ -142,10 +147,11 @@ services:
       dockerfile: Dockerfile
     container_name: itsm-celery-beat
     restart: always
-    command: celery -A config beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
+    command: celery -A itsm_project beat -l info --scheduler django_celery_beat.schedulers:DatabaseScheduler
     environment:
       DEBUG: ${DEBUG:-False}
       SECRET_KEY: ${SECRET_KEY:-change-me-in-production}
+      DATABASE_URL: postgresql://${DB_USER:-postgres}:${DB_PASSWORD:-postgres}@postgres:${DB_PORT:-5432}/${DB_NAME:-itsm_db}
       DB_ENGINE: django.db.backends.postgresql
       DB_NAME: ${DB_NAME:-itsm_db}
       DB_USER: ${DB_USER:-postgres}
@@ -166,6 +172,8 @@ services:
       options:
         max-size: "10m"
         max-file: "3"
+    healthcheck:
+      disable: true
 
   # Nginx Reverse Proxy
   nginx:
@@ -253,6 +261,46 @@ services:
         max-size: "10m"
         max-file: "3"
 
+  # Elasticsearch for search/logging
+  elasticsearch:
+    image: elasticsearch:8.12.2
+    container_name: itsm-elasticsearch
+    restart: always
+    environment:
+      discovery.type: single-node
+      xpack.security.enabled: "false"
+      ES_JAVA_OPTS: "-Xms512m -Xmx512m"
+    ports:
+      - "${ELASTIC_PORT:-9200}:9200"
+    volumes:
+      - elasticsearch_data:/usr/share/elasticsearch/data
+    networks:
+      - itsm-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Kibana for Elasticsearch UI
+  kibana:
+    image: kibana:8.12.2
+    container_name: itsm-kibana
+    restart: always
+    environment:
+      ELASTICSEARCH_HOSTS: http://elasticsearch:9200
+    ports:
+      - "${KIBANA_PORT:-5601}:5601"
+    depends_on:
+      - elasticsearch
+    networks:
+      - itsm-network
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+
 volumes:
   postgres_data:
     driver: local
@@ -262,23 +310,12 @@ volumes:
     driver: local
   grafana_data:
     driver: local
+  elasticsearch_data:
+    driver: local
   staticfiles_volume:
     driver: local
   media_volume:
     driver: local
-
-networks:
-  itsm-network:
-    driver: bridge
-      CELERY_RESULT_BACKEND: redis://redis:6379/0
-    depends_on:
-      - postgres
-      - redis
-    networks:
-      - itsm-network
-
-volumes:
-  postgres_data:
 
 networks:
   itsm-network:

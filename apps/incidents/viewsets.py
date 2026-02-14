@@ -5,13 +5,25 @@ from rest_framework import viewsets, status, filters
 from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
+from rest_framework.exceptions import ValidationError, PermissionDenied
+from datetime import timedelta
+from django.db.models import Q
+from django.utils import timezone
 from django_filters.rest_framework import DjangoFilterBackend
 
-from apps.incidents.models import Incident, IncidentComment, IncidentWorkaround, IncidentAttachment
+from apps.incidents.models import (
+    Incident, IncidentComment, IncidentWorkaround, IncidentAttachment,
+    IncidentPriority, IncidentStatus, IncidentCommunication
+)
 from apps.incidents.serializers import (
     IncidentListSerializer, IncidentDetailSerializer, IncidentCreateUpdateSerializer,
     IncidentActionSerializer, IncidentCommentSerializer, IncidentWorkaroundSerializer,
-    IncidentAttachmentSerializer
+    IncidentAttachmentSerializer, IncidentCommunicationSerializer
+)
+from apps.organizations.models import Organization
+from apps.workflows.utils import (
+    ensure_workflow_instance_for_incident,
+    advance_workflow,
 )
 
 
@@ -32,21 +44,87 @@ class IncidentViewSet(viewsets.ModelViewSet):
         elif self.action in ['create', 'update', 'partial_update']:
             return IncidentCreateUpdateSerializer
         return IncidentDetailSerializer
+
+    def create(self, request, *args, **kwargs):
+        """Create incident and return detail payload including id."""
+        serializer = self.get_serializer(data=request.data)
+        serializer.is_valid(raise_exception=True)
+        self.perform_create(serializer)
+
+        detail_serializer = IncidentDetailSerializer(
+            serializer.instance,
+            context=self.get_serializer_context(),
+        )
+        headers = self.get_success_headers(detail_serializer.data)
+        return Response(detail_serializer.data, status=status.HTTP_201_CREATED, headers=headers)
     
     def get_queryset(self):
         """Filter incidents by user's organization"""
         user = self.request.user
+        queryset = Incident.objects.filter(deleted_at__isnull=True)
+
         if user.is_superuser:
-            return Incident.objects.filter(deleted_at__isnull=True)
-        return Incident.objects.filter(organization_id=user.organization_id, deleted_at__isnull=True)
+            return queryset
+
+        queryset = queryset.filter(organization_id=user.organization_id)
+
+        if user.role == 'end_user':
+            return queryset.filter(Q(requester=user) | Q(created_by=user))
+
+        return queryset
+
+    def get_object(self):
+        incident = super().get_object()
+        user = self.request.user
+
+        if not user.is_superuser and user.role == 'end_user':
+            if incident.requester_id != user.id and incident.created_by_id != user.id:
+                raise PermissionDenied('End users can only access their own incidents.')
+
+        return incident
     
     def perform_create(self, serializer):
         """Set created_by when creating incident"""
-        serializer.save(created_by=self.request.user)
+        organization = self._resolve_organization()
+        if not organization:
+            raise ValidationError({'organization': 'User does not belong to an organization.'})
+
+        requester = serializer.validated_data.get('requester') or self.request.user
+        incident = serializer.save(
+            organization=organization,
+            requester=requester,
+            created_by=self.request.user
+        )
+
+        if incident.is_major and incident.communication_cadence_minutes:
+            incident.next_communication_due = timezone.now() + timedelta(
+                minutes=incident.communication_cadence_minutes
+            )
+            incident.save(update_fields=['next_communication_due'])
+
+        ensure_workflow_instance_for_incident(incident, user=self.request.user)
+
+    def _resolve_organization(self):
+        user = self.request.user
+        user_org = getattr(user, 'organization', None)
+        if user_org:
+            matched = Organization.objects.filter(name=user_org.name).first()
+            if matched:
+                return matched
+        if user.is_superuser:
+            return Organization.objects.filter(is_active=True).first()
+        return None
     
     def perform_update(self, serializer):
         """Set updated_by when updating incident"""
         serializer.save(updated_by=self.request.user)
+
+    def retrieve(self, request, *args, **kwargs):
+        incident = self.get_object()
+        if incident.update_breach_status():
+            incident.save(update_fields=['ola_breach', 'uc_breach'])
+        serializer = self.get_serializer(incident)
+        return Response(serializer.data)
     
     @action(detail=True, methods=['post'])
     def resolve(self, request, pk=None):
@@ -54,12 +132,20 @@ class IncidentViewSet(viewsets.ModelViewSet):
         incident = self.get_object()
         resolution_notes = request.data.get('resolution_notes', '')
         resolution_code = request.data.get('resolution_code', '')
+
+        if not str(resolution_notes).strip() or not str(resolution_code).strip():
+            return Response(
+                {'detail': 'Resolution code and notes are required to resolve an incident.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         
         incident.status = 'resolved'
         incident.resolution_notes = resolution_notes
         incident.resolution_code = resolution_code
         incident.resolved_at = timezone.now()
         incident.save()
+        instance = ensure_workflow_instance_for_incident(incident, user=request.user)
+        advance_workflow(instance, status='resolved', user=request.user)
         
         return Response({'detail': f'Incident {incident.ticket_number} resolved'})
     
@@ -67,9 +153,18 @@ class IncidentViewSet(viewsets.ModelViewSet):
     def close(self, request, pk=None):
         """Close an incident"""
         incident = self.get_object()
+
+        if incident.status != IncidentStatus.RESOLVED:
+            return Response(
+                {'detail': 'Incident must be resolved before closure.'},
+                status=status.HTTP_400_BAD_REQUEST
+            )
         incident.status = 'closed'
         incident.closed_at = timezone.now()
         incident.save()
+
+        instance = ensure_workflow_instance_for_incident(incident, user=request.user)
+        advance_workflow(instance, status='closed', user=request.user, complete=True)
         
         return Response({'detail': f'Incident {incident.ticket_number} closed'})
     
@@ -77,9 +172,12 @@ class IncidentViewSet(viewsets.ModelViewSet):
     def reopen(self, request, pk=None):
         """Reopen an incident"""
         incident = self.get_object()
-        incident.status = 'open'
-        incident.save()
-        
+        incident.status = IncidentStatus.REOPENED
+        incident.save(update_fields=['status'])
+
+        instance = ensure_workflow_instance_for_incident(incident, user=request.user)
+        advance_workflow(instance, status='reopened', user=request.user)
+
         return Response({'detail': f'Incident {incident.ticket_number} reopened'})
     
     @action(detail=True, methods=['post'])
@@ -92,6 +190,8 @@ class IncidentViewSet(viewsets.ModelViewSet):
             incident.assigned_to_id = assigned_to_id
             incident.status = 'assigned'
             incident.save()
+            instance = ensure_workflow_instance_for_incident(incident, user=request.user)
+            advance_workflow(instance, status='assigned', user=request.user)
             return Response({'detail': 'Incident assigned'})
         except Exception as e:
             return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
@@ -100,9 +200,12 @@ class IncidentViewSet(viewsets.ModelViewSet):
     def escalate(self, request, pk=None):
         """Escalate an incident"""
         incident = self.get_object()
-        incident.priority = 'critical'
+        incident.priority = IncidentPriority.CRITICAL
         incident.sla_escalated = True
-        incident.save()
+        incident.save(update_fields=['priority', 'sla_escalated'])
+
+        instance = ensure_workflow_instance_for_incident(incident, user=request.user)
+        advance_workflow(instance, status='escalated', user=request.user)
         
         return Response({'detail': f'Incident {incident.ticket_number} escalated'})
     
@@ -129,6 +232,29 @@ class IncidentViewSet(viewsets.ModelViewSet):
         )
         
         serializer = IncidentCommentSerializer(comment)
+        return Response(serializer.data, status=status.HTTP_201_CREATED)
+
+    @action(detail=True, methods=['post'])
+    def add_communication(self, request, pk=None):
+        """Add communication entry for an incident"""
+        incident = self.get_object()
+        serializer = IncidentCommunicationSerializer(data={
+            'incident': incident.id,
+            'channel': request.data.get('channel'),
+            'audience': request.data.get('audience'),
+            'message': request.data.get('message'),
+            'sent_at': request.data.get('sent_at') or timezone.now(),
+            'sent_by': request.user.id,
+        })
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
+
+        if incident.is_major and incident.communication_cadence_minutes:
+            incident.next_communication_due = timezone.now() + timedelta(
+                minutes=incident.communication_cadence_minutes
+            )
+            incident.save(update_fields=['next_communication_due'])
+
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
 

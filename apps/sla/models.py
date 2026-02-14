@@ -66,6 +66,34 @@ class SLAPolicy(AuditModel):
         return self.name
 
 
+class SLATarget(AuditModel):
+    """SLA targets per severity"""
+    sla_policy = models.ForeignKey(
+        SLAPolicy,
+        on_delete=models.CASCADE,
+        related_name='targets'
+    )
+
+    SEVERITY_CHOICES = [
+        ('critical', 'Critical'),
+        ('high', 'High'),
+        ('medium', 'Medium'),
+        ('low', 'Low'),
+    ]
+    severity = models.CharField(max_length=20, choices=SEVERITY_CHOICES)
+
+    # Targets are stored in minutes
+    response_time_minutes = models.IntegerField()
+    resolution_time_minutes = models.IntegerField()
+
+    class Meta:
+        unique_together = ['sla_policy', 'severity']
+        ordering = ['severity']
+        indexes = [
+            models.Index(fields=['sla_policy', 'severity']),
+        ]
+
+
 class SLABreach(AuditModel):
     """Track SLA breaches"""
     organization = models.ForeignKey(

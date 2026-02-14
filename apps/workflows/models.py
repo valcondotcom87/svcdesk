@@ -76,6 +76,20 @@ class WorkflowInstance(AuditModel):
         blank=True,
         related_name='workflow_instances'
     )
+    service_request = models.ForeignKey(
+        'service_requests.ServiceRequest',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='workflow_instances'
+    )
+    change_request = models.ForeignKey(
+        'changes.Change',
+        on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='workflow_instances'
+    )
     
     # Status
     status = models.CharField(

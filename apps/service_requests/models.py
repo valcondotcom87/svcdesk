@@ -2,6 +2,7 @@
 Service Requests Models - Service fulfillment management
 """
 from django.db import models
+from django.utils import timezone
 from apps.core.models import TimeStampedModel, AuditModel
 
 
@@ -132,9 +133,35 @@ class ServiceRequest(AuditModel):
     approved_at = models.DateTimeField(null=True, blank=True)
     fulfilled_at = models.DateTimeField(null=True, blank=True)
     due_date = models.DateTimeField(null=True, blank=True)
+
+    # SLA
+    sla_policy = models.ForeignKey(
+        'sla.SLAPolicy',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='service_requests'
+    )
+    sla_due_date = models.DateTimeField(null=True, blank=True)
+    sla_breach = models.BooleanField(default=False)
     
     # Priority
     priority = models.IntegerField(choices=[(1, 'High'), (2, 'Medium'), (3, 'Low')], default=2)
+
+    def update_breach_status(self, now=None):
+        now = now or timezone.now()
+        closed_statuses = {'fulfilled', 'closed', 'rejected'}
+        should_check = self.status not in closed_statuses
+
+        if not self.sla_due_date:
+            return False
+
+        breach = self.sla_breach or (should_check and now > self.sla_due_date)
+        if breach != self.sla_breach:
+            self.sla_breach = breach
+            return True
+
+        return False
     
     class Meta:
         ordering = ['-created_at']

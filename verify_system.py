@@ -25,16 +25,16 @@ def banner(text):
 def test_endpoint(method, endpoint, data=None, auth_token=None):
     """Test an endpoint and return results"""
     client = APIClient()
-    
-    headers = {}
+    host = os.getenv('SITE_DOMAIN', 'localhost')
+    extra = {'HTTP_HOST': host}
     if auth_token:
-        headers['Authorization'] = f'Bearer {auth_token}'
+        extra['HTTP_AUTHORIZATION'] = f'Bearer {auth_token}'
     
     try:
         if method == 'GET':
-            response = client.get(endpoint, headers=headers)
+            response = client.get(endpoint, **extra)
         elif method == 'POST':
-            response = client.post(endpoint, data=data, format='json', headers=headers)
+            response = client.post(endpoint, data=data, format='json', **extra)
         else:
             return {'status': 'error', 'message': f'Unsupported method: {method}'}
         

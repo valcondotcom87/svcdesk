@@ -40,6 +40,25 @@ class IncidentStatus(models.TextChoices):
     REOPENED = 'reopened', 'Reopened'
 
 
+class MajorIncidentLevel(models.TextChoices):
+    MI1 = 'mi1', 'Major 1 (Critical)'
+    MI2 = 'mi2', 'Major 2 (High)'
+    MI3 = 'mi3', 'Major 3 (Medium)'
+
+
+class EscalationStatus(models.TextChoices):
+    NOT_ESCALATED = 'not_escalated', 'Not Escalated'
+    ESCALATED = 'escalated', 'Escalated'
+    DE_ESCALATED = 'de_escalated', 'De-escalated'
+
+
+class PostIncidentReviewStatus(models.TextChoices):
+    NOT_REQUIRED = 'not_required', 'Not Required'
+    PENDING = 'pending', 'Pending'
+    IN_REVIEW = 'in_review', 'In Review'
+    COMPLETED = 'completed', 'Completed'
+
+
 class Incident(AuditModel):
     """
     Core incident ticket model
@@ -95,6 +114,25 @@ class Incident(AuditModel):
         default=IncidentStatus.NEW,
         db_index=True
     )
+    is_major = models.BooleanField(default=False)
+    major_incident_level = models.CharField(
+        max_length=10,
+        choices=MajorIncidentLevel.choices,
+        null=True,
+        blank=True
+    )
+    escalation_status = models.CharField(
+        max_length=20,
+        choices=EscalationStatus.choices,
+        default=EscalationStatus.NOT_ESCALATED
+    )
+    major_incident_manager = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='major_incidents'
+    )
     resolution_code = models.CharField(max_length=100, blank=True)
     resolution_notes = models.TextField(blank=True)
     
@@ -102,6 +140,8 @@ class Incident(AuditModel):
     first_response_time = models.DateTimeField(null=True, blank=True)
     resolved_at = models.DateTimeField(null=True, blank=True)
     closed_at = models.DateTimeField(null=True, blank=True)
+    communication_cadence_minutes = models.IntegerField(default=60)
+    next_communication_due = models.DateTimeField(null=True, blank=True)
     
     # SLA
     sla_breach = models.BooleanField(default=False, db_index=True)
@@ -114,6 +154,30 @@ class Incident(AuditModel):
     )
     sla_due_date = models.DateTimeField(null=True, blank=True)
     sla_escalated = models.BooleanField(default=False)
+    ola_target_minutes = models.IntegerField(null=True, blank=True)
+    uc_target_minutes = models.IntegerField(null=True, blank=True)
+    ola_due_date = models.DateTimeField(null=True, blank=True)
+    uc_due_date = models.DateTimeField(null=True, blank=True)
+    ola_breach = models.BooleanField(default=False)
+    uc_breach = models.BooleanField(default=False)
+
+    # Post-Incident Review (PIR)
+    pir_required = models.BooleanField(default=False)
+    pir_status = models.CharField(
+        max_length=20,
+        choices=PostIncidentReviewStatus.choices,
+        default=PostIncidentReviewStatus.NOT_REQUIRED
+    )
+    pir_summary = models.TextField(blank=True)
+    pir_notes = models.TextField(blank=True)
+    pir_owner = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='pir_incidents'
+    )
+    pir_completed_at = models.DateTimeField(null=True, blank=True)
     
     # Related
     related_problem = models.ForeignKey(
@@ -167,6 +231,25 @@ class Incident(AuditModel):
         )
         return self.priority
 
+    def update_breach_status(self, now=None):
+        now = now or timezone.now()
+        should_check = self.status not in [IncidentStatus.RESOLVED, IncidentStatus.CLOSED]
+        updated = False
+
+        if self.ola_due_date:
+            breach = self.ola_breach or (should_check and now > self.ola_due_date)
+            if breach != self.ola_breach:
+                self.ola_breach = breach
+                updated = True
+
+        if self.uc_due_date:
+            breach = self.uc_breach or (should_check and now > self.uc_due_date)
+            if breach != self.uc_breach:
+                self.uc_breach = breach
+                updated = True
+
+        return updated
+
 
 class IncidentComment(AuditModel):
     """Comments and notes on incidents"""
@@ -211,6 +294,42 @@ class IncidentAttachment(AuditModel):
     filename = models.CharField(max_length=255)
     file_type = models.CharField(max_length=50)
     file_size = models.IntegerField()
+
+
+class IncidentCommunication(AuditModel):
+    """Major incident communication log"""
+
+    CHANNEL_CHOICES = [
+        ('email', 'Email'),
+        ('sms', 'SMS'),
+        ('portal', 'Portal'),
+        ('chat', 'Chat'),
+        ('call', 'Call'),
+        ('meeting', 'Meeting'),
+    ]
+
+    AUDIENCE_CHOICES = [
+        ('internal', 'Internal'),
+        ('external', 'External'),
+        ('executive', 'Executive'),
+    ]
+
+    incident = models.ForeignKey(
+        Incident,
+        on_delete=models.CASCADE,
+        related_name='communications'
+    )
+    channel = models.CharField(max_length=20, choices=CHANNEL_CHOICES)
+    audience = models.CharField(max_length=20, choices=AUDIENCE_CHOICES)
+    message = models.TextField()
+    sent_at = models.DateTimeField(default=timezone.now)
+    sent_by = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='incident_communications'
+    )
 
 
 class IncidentMetric(TimeStampedModel):

@@ -62,9 +62,14 @@ CREATE TABLE IF NOT EXISTS audit.audit_log (
     new_data JSONB,
     changed_by TEXT,
     changed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-    INDEX idx_table_record (table_name, record_id),
-    INDEX idx_changed_at (changed_at DESC)
+    CONSTRAINT audit_log_table_action_chk CHECK (action <> '')
 );
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_table_record
+    ON audit.audit_log (table_name, record_id);
+
+CREATE INDEX IF NOT EXISTS idx_audit_log_changed_at_desc
+    ON audit.audit_log (changed_at DESC);
 
 -- Done
 SELECT now() as initialization_complete;

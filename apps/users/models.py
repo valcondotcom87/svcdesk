@@ -67,6 +67,8 @@ class User(TimeStampedModel, AbstractBaseUser, PermissionsMixin):
     """
     ROLE_CHOICES = [
         ('end_user', 'End User'),
+        ('asset_manager', 'Asset Manager'),
+        ('engineer', 'Engineer'),
         ('agent', 'Agent'),
         ('manager', 'Manager'),
         ('admin', 'Administrator'),
@@ -248,3 +250,35 @@ class UserRole(UUIDModel):
     
     def __str__(self):
         return f"{self.user.get_full_name()} - {self.role.name}"
+
+
+class ADSyncLog(UUIDModel):
+    """Audit log for AD sync runs."""
+
+    STATUS_CHOICES = [
+        ('success', 'Success'),
+        ('failed', 'Failed'),
+    ]
+
+    started_at = models.DateTimeField(auto_now_add=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    status = models.CharField(max_length=20, choices=STATUS_CHOICES, default='success')
+    created_count = models.IntegerField(default=0)
+    updated_count = models.IntegerField(default=0)
+    skipped_count = models.IntegerField(default=0)
+    error_message = models.TextField(blank=True)
+    triggered_by = models.ForeignKey(
+        User,
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='ad_sync_runs'
+    )
+    source = models.CharField(max_length=50, default='manual')
+
+    class Meta:
+        db_table = 'ad_sync_logs'
+        ordering = ['-started_at']
+
+    def __str__(self):
+        return f"AD Sync {self.status} @ {self.started_at}" 
