@@ -13,7 +13,7 @@ COPY requirements.txt .
 RUN python -m venv /opt/venv
 ENV PATH="/opt/venv/bin:$PATH"
 
-RUN pip install --upgrade pip setuptools wheel \
+RUN pip install --upgrade pip wheel setuptools==80.0.0 \
     && pip install -r requirements.txt
 
 FROM python:3.11-slim

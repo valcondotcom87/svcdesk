@@ -24,7 +24,12 @@ def _serialize_value(value):
 def _get_organization(instance):
     organization = getattr(instance, 'organization', None)
     if organization:
-        return organization
+        if isinstance(organization, Organization):
+            return organization
+        org_id = getattr(organization, 'id', None)
+        if org_id:
+            return Organization.objects.filter(id=org_id).first()
+        return None
     organization_id = getattr(instance, 'organization_id', None)
     if not organization_id:
         return None

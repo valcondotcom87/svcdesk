@@ -19,6 +19,7 @@ from apps.assets.serializers import (
 )
 from apps.organizations.models import Organization
 from apps.users.models import User
+from apps.core.permissions import permission_required
 
 
 class AssetCategoryViewSet(viewsets.ReadOnlyModelViewSet):
@@ -30,6 +31,16 @@ class AssetCategoryViewSet(viewsets.ReadOnlyModelViewSet):
     search_fields = ['name']
     ordering = ['name']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'assets.view',
+            'retrieve': 'assets.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class AssetViewSet(viewsets.ModelViewSet):
     """ViewSet for assets"""
@@ -39,6 +50,24 @@ class AssetViewSet(viewsets.ModelViewSet):
     search_fields = ['asset_tag', 'name', 'serial_number']
     ordering_fields = ['name', 'purchase_date', 'cost']
     ordering = ['name']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'assets.view',
+            'retrieve': 'assets.view',
+            'create': 'assets.create',
+            'update': 'assets.update',
+            'partial_update': 'assets.update',
+            'destroy': 'assets.update',
+            'transfer': 'assets.transfer',
+            'record_maintenance': 'assets.maintenance',
+            'transfer_history': 'assets.view',
+            'maintenance_history': 'assets.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -148,6 +177,16 @@ class AssetDepreciationViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ['asset', 'depreciation_method']
     ordering = ['-last_calculated_at']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'assets.view',
+            'retrieve': 'assets.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class AssetMaintenanceViewSet(viewsets.ModelViewSet):
     """ViewSet for asset maintenance"""
@@ -158,6 +197,20 @@ class AssetMaintenanceViewSet(viewsets.ModelViewSet):
     filterset_fields = ['asset', 'maintenance_type', 'performed_by']
     ordering = ['-maintenance_date']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'assets.view',
+            'retrieve': 'assets.view',
+            'create': 'assets.maintenance',
+            'update': 'assets.maintenance',
+            'partial_update': 'assets.maintenance',
+            'destroy': 'assets.maintenance',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class AssetTransferViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing asset transfers"""
@@ -167,3 +220,13 @@ class AssetTransferViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['asset', 'from_user', 'to_user']
     ordering = ['-transfer_date']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'assets.view',
+            'retrieve': 'assets.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]

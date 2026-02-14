@@ -1,0 +1,11 @@
+[Unit]
+Description=ITSM container healthcheck and alerting
+
+[Service]
+Type=oneshot
+Environment=ALERT_EMAIL_TO=
+Environment=ALERT_EMAIL_FROM=itsm-alerts@localhost
+Environment=ALERT_EMAIL_SUBJECT=[ITSM] Container Health Alert
+Environment=TELEGRAM_BOT_TOKEN=
+Environment=TELEGRAM_CHAT_ID=
+ExecStart=/opt/itsm-platform/backend/scripts/healthcheck_alert.sh

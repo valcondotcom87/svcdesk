@@ -13,6 +13,7 @@ from apps.cmdb.serializers import (
     CICategorySerializer, CIListSerializer, CIDetailSerializer,
     CICreateUpdateSerializer, CIAttributeSerializer, CIRelationshipSerializer
 )
+from apps.core.permissions import permission_required
 
 
 class CICategoryViewSet(viewsets.ModelViewSet):
@@ -23,6 +24,20 @@ class CICategoryViewSet(viewsets.ModelViewSet):
     filter_backends = [filters.SearchFilter, filters.OrderingFilter]
     search_fields = ['name']
     ordering = ['name']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'cmdb.view',
+            'retrieve': 'cmdb.view',
+            'create': 'cmdb.update',
+            'update': 'cmdb.update',
+            'partial_update': 'cmdb.update',
+            'destroy': 'cmdb.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
 
     def perform_create(self, serializer):
         """Set organization when creating a CI category"""
@@ -41,6 +56,23 @@ class CIViewSet(viewsets.ModelViewSet):
     search_fields = ['name', 'serial_number']
     ordering_fields = ['name', 'created_at']
     ordering = ['name']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'cmdb.view',
+            'retrieve': 'cmdb.view',
+            'create': 'cmdb.create',
+            'update': 'cmdb.update',
+            'partial_update': 'cmdb.update',
+            'destroy': 'cmdb.update',
+            'add_attribute': 'cmdb.update',
+            'relationships': 'cmdb.view',
+            'add_relationship': 'cmdb.relationship',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -122,6 +154,16 @@ class CIAttributeViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ['ci']
     search_fields = ['attribute_name']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'cmdb.view',
+            'retrieve': 'cmdb.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class CIAttributeValueViewSet(viewsets.ModelViewSet):
     """ViewSet for CI attribute values (uses CIAttribute model)"""
@@ -132,6 +174,20 @@ class CIAttributeValueViewSet(viewsets.ModelViewSet):
     filterset_fields = ['ci']
     ordering = ['id']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'cmdb.view',
+            'retrieve': 'cmdb.view',
+            'create': 'cmdb.update',
+            'update': 'cmdb.update',
+            'partial_update': 'cmdb.update',
+            'destroy': 'cmdb.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class CIRelationshipViewSet(viewsets.ModelViewSet):
     """ViewSet for CI relationships"""
@@ -141,6 +197,20 @@ class CIRelationshipViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['source_ci', 'target_ci', 'relationship_type']
     ordering = ['id']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'cmdb.view',
+            'retrieve': 'cmdb.view',
+            'create': 'cmdb.relationship',
+            'update': 'cmdb.relationship',
+            'partial_update': 'cmdb.relationship',
+            'destroy': 'cmdb.relationship',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
 
     def perform_create(self, serializer):
         user = self.request.user

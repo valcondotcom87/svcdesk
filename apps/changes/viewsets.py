@@ -20,6 +20,7 @@ from apps.changes.serializers import (
 )
 from apps.organizations.models import Organization
 from apps.users.models import User
+from apps.core.permissions import permission_required
 from apps.workflows.utils import (
     ensure_workflow_instance_for_change,
     advance_workflow,
@@ -35,6 +36,25 @@ class ChangeViewSet(viewsets.ModelViewSet):
     search_fields = ['ticket_number', 'title']
     ordering_fields = ['created_at', 'implementation_date', 'completed_date']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'changes.view',
+            'retrieve': 'changes.view',
+            'create': 'changes.create',
+            'update': 'changes.update',
+            'partial_update': 'changes.update',
+            'destroy': 'changes.update',
+            'submit': 'changes.submit',
+            'approve': 'changes.approve',
+            'reject': 'changes.reject',
+            'implement': 'changes.implement',
+            'complete': 'changes.complete',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -272,6 +292,20 @@ class CABMemberViewSet(viewsets.ModelViewSet):
     filterset_fields = ['change', 'role']
     ordering = ['id']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'changes.view',
+            'retrieve': 'changes.view',
+            'create': 'changes.update',
+            'update': 'changes.update',
+            'partial_update': 'changes.update',
+            'destroy': 'changes.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class ChangeApprovalViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing change approvals"""
@@ -281,6 +315,16 @@ class ChangeApprovalViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['change', 'cab_member', 'status']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'changes.view',
+            'retrieve': 'changes.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
 
 
 class ChangeImpactAnalysisViewSet(viewsets.ModelViewSet):
@@ -292,6 +336,20 @@ class ChangeImpactAnalysisViewSet(viewsets.ModelViewSet):
     filterset_fields = ['change']
     ordering = ['-created_at']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'changes.view',
+            'retrieve': 'changes.view',
+            'create': 'changes.update',
+            'update': 'changes.update',
+            'partial_update': 'changes.update',
+            'destroy': 'changes.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class ChangeLogViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing change logs"""
@@ -301,3 +359,13 @@ class ChangeLogViewSet(viewsets.ReadOnlyModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['change', 'action']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'changes.view',
+            'retrieve': 'changes.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]

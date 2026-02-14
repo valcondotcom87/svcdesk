@@ -1,0 +1,6 @@
+[Unit]
+Description=Renew SSL certificates and reload Nginx
+
+[Service]
+Type=oneshot
+ExecStart=/opt/itsm-platform/backend/scripts/renew_ssl.sh

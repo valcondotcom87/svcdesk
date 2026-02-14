@@ -21,6 +21,7 @@ from apps.incidents.serializers import (
     IncidentAttachmentSerializer, IncidentCommunicationSerializer
 )
 from apps.organizations.models import Organization
+from apps.core.permissions import permission_required
 from apps.workflows.utils import (
     ensure_workflow_instance_for_incident,
     advance_workflow,
@@ -36,6 +37,28 @@ class IncidentViewSet(viewsets.ModelViewSet):
     search_fields = ['ticket_number', 'title', 'description']
     ordering_fields = ['created_at', 'priority', 'sla_due_date']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'incidents.view',
+            'retrieve': 'incidents.view',
+            'create': 'incidents.create',
+            'update': 'incidents.update',
+            'partial_update': 'incidents.update',
+            'destroy': 'incidents.update',
+            'resolve': 'incidents.resolve',
+            'close': 'incidents.close',
+            'reopen': 'incidents.reopen',
+            'assign': 'incidents.assign',
+            'escalate': 'incidents.escalate',
+            'comments': 'incidents.view',
+            'add_comment': 'incidents.comment',
+            'add_communication': 'incidents.communicate',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -267,6 +290,20 @@ class IncidentCommentViewSet(viewsets.ModelViewSet):
     filterset_fields = ['incident', 'is_internal']
     ordering = ['-created_at']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'incidents.view',
+            'retrieve': 'incidents.view',
+            'create': 'incidents.comment',
+            'update': 'incidents.comment',
+            'partial_update': 'incidents.comment',
+            'destroy': 'incidents.comment',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class IncidentWorkaroundViewSet(viewsets.ModelViewSet):
     """ViewSet for incident workarounds"""
@@ -277,6 +314,20 @@ class IncidentWorkaroundViewSet(viewsets.ModelViewSet):
     filterset_fields = ['incident']
     search_fields = ['title']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'incidents.view',
+            'retrieve': 'incidents.view',
+            'create': 'incidents.update',
+            'update': 'incidents.update',
+            'partial_update': 'incidents.update',
+            'destroy': 'incidents.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class IncidentAttachmentViewSet(viewsets.ModelViewSet):
     """ViewSet for incident attachments"""
@@ -286,3 +337,17 @@ class IncidentAttachmentViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['incident']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'incidents.view',
+            'retrieve': 'incidents.view',
+            'create': 'incidents.update',
+            'update': 'incidents.update',
+            'partial_update': 'incidents.update',
+            'destroy': 'incidents.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]

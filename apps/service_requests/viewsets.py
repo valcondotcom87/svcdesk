@@ -23,6 +23,7 @@ from apps.service_requests.serializers import (
 )
 from apps.organizations.models import Organization, ModuleCategory
 from apps.users.models import User
+from apps.core.permissions import permission_required
 from apps.workflows.utils import (
     ensure_workflow_instance_for_service_request,
     advance_workflow,
@@ -48,6 +49,20 @@ class ServiceCategoryViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['organization']
     search_fields = ['name']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'service_requests.view',
+            'retrieve': 'service_requests.view',
+            'create': 'categories.manage',
+            'update': 'categories.manage',
+            'partial_update': 'categories.manage',
+            'destroy': 'categories.manage',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
     
     def get_queryset(self):
         """Filter by user's organization"""
@@ -72,6 +87,20 @@ class ServiceViewSet(viewsets.ModelViewSet):
     filterset_fields = ['category', 'organization']
     search_fields = ['name', 'description']
     ordering = ['name']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'service_requests.view',
+            'retrieve': 'service_requests.view',
+            'create': 'categories.manage',
+            'update': 'categories.manage',
+            'partial_update': 'categories.manage',
+            'destroy': 'categories.manage',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -105,6 +134,24 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
     search_fields = ['ticket_number', 'title']
     ordering_fields = ['created_at', 'sla_due_date']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'service_requests.view',
+            'retrieve': 'service_requests.view',
+            'create': 'service_requests.create',
+            'update': 'service_requests.update',
+            'partial_update': 'service_requests.update',
+            'destroy': 'service_requests.update',
+            'submit': 'service_requests.submit',
+            'approve': 'service_requests.approve',
+            'reject': 'service_requests.reject',
+            'complete': 'service_requests.fulfill',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
     
     def get_serializer_class(self):
         """Return appropriate serializer based on action"""
@@ -369,6 +416,20 @@ class ServiceRequestItemViewSet(viewsets.ModelViewSet):
     filterset_fields = ['request']
     ordering = ['id']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'service_requests.view',
+            'retrieve': 'service_requests.view',
+            'create': 'service_requests.update',
+            'update': 'service_requests.update',
+            'partial_update': 'service_requests.update',
+            'destroy': 'service_requests.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class ServiceRequestApprovalViewSet(viewsets.ReadOnlyModelViewSet):
     """ViewSet for viewing service request approvals"""
@@ -379,6 +440,16 @@ class ServiceRequestApprovalViewSet(viewsets.ReadOnlyModelViewSet):
     filterset_fields = ['request', 'approver', 'status']
     ordering = ['approval_level']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'service_requests.view',
+            'retrieve': 'service_requests.view',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class ServiceRequestAttachmentViewSet(viewsets.ModelViewSet):
     """ViewSet for service request attachments"""
@@ -388,3 +459,17 @@ class ServiceRequestAttachmentViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.OrderingFilter]
     filterset_fields = ['request']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'service_requests.view',
+            'retrieve': 'service_requests.view',
+            'create': 'service_requests.update',
+            'update': 'service_requests.update',
+            'partial_update': 'service_requests.update',
+            'destroy': 'service_requests.update',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]

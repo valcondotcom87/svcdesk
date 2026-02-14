@@ -15,6 +15,7 @@ from apps.problems.serializers import (
     RCASerializer, KEDBSerializer
 )
 from apps.organizations.models import Organization
+from apps.core.permissions import permission_required
 
 
 class ProblemViewSet(viewsets.ModelViewSet):
@@ -26,6 +27,22 @@ class ProblemViewSet(viewsets.ModelViewSet):
     search_fields = ['ticket_number', 'title', 'description']
     ordering_fields = ['created_at']
     ordering = ['-created_at']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'problems.view',
+            'retrieve': 'problems.view',
+            'create': 'problems.create',
+            'update': 'problems.update',
+            'partial_update': 'problems.update',
+            'destroy': 'problems.update',
+            'add_rca': 'problems.add_rca',
+            'add_kedb': 'problems.add_kedb',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
 
     def get_serializer_class(self):
         if self.action == 'list':
@@ -127,6 +144,20 @@ class RCAViewSet(viewsets.ModelViewSet):
     filterset_fields = ['problem']
     ordering = ['-created_at']
 
+    def get_permissions(self):
+        action_map = {
+            'list': 'problems.view',
+            'retrieve': 'problems.view',
+            'create': 'problems.add_rca',
+            'update': 'problems.add_rca',
+            'partial_update': 'problems.add_rca',
+            'destroy': 'problems.add_rca',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]
+
 
 class KEDBViewSet(viewsets.ModelViewSet):
     """ViewSet for Known Error Database"""
@@ -136,3 +167,17 @@ class KEDBViewSet(viewsets.ModelViewSet):
     filter_backends = [DjangoFilterBackend, filters.SearchFilter]
     filterset_fields = ['problem']
     search_fields = ['title', 'description', 'error_code']
+
+    def get_permissions(self):
+        action_map = {
+            'list': 'problems.view',
+            'retrieve': 'problems.view',
+            'create': 'problems.add_kedb',
+            'update': 'problems.add_kedb',
+            'partial_update': 'problems.add_kedb',
+            'destroy': 'problems.add_kedb',
+        }
+        permission = action_map.get(self.action)
+        if permission:
+            return [permission_required(permission)()]
+        return [IsAuthenticated()]

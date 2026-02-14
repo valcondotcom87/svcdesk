@@ -74,10 +74,54 @@ class HasRole(permissions.BasePermission):
 
 
 DEFAULT_ROLE_PERMISSION_MAP = {
-    'admin': {'users.manage', 'organizations.manage', 'ad.sync', 'users.impersonate', 'categories.manage'},
-    'manager': {'users.manage', 'categories.manage'},
-    'agent': set(),
-    'end_user': set(),
+    'admin': {
+        'users.manage', 'organizations.manage', 'ad.sync', 'users.impersonate', 'categories.manage',
+        'incidents.view', 'incidents.create', 'incidents.update', 'incidents.assign', 'incidents.resolve',
+        'incidents.close', 'incidents.reopen', 'incidents.escalate', 'incidents.comment', 'incidents.communicate',
+        'service_requests.view', 'service_requests.create', 'service_requests.update', 'service_requests.submit',
+        'service_requests.approve', 'service_requests.reject', 'service_requests.fulfill',
+        'changes.view', 'changes.create', 'changes.update', 'changes.submit', 'changes.approve', 'changes.reject',
+        'changes.implement', 'changes.complete',
+        'problems.view', 'problems.create', 'problems.update', 'problems.add_rca', 'problems.add_kedb',
+        'cmdb.view', 'cmdb.create', 'cmdb.update', 'cmdb.relationship',
+        'assets.view', 'assets.create', 'assets.update', 'assets.transfer', 'assets.maintenance',
+        'knowledge.create', 'knowledge.update', 'knowledge.publish', 'knowledge.delete',
+    },
+    'manager': {
+        'users.manage', 'categories.manage',
+        'incidents.view', 'incidents.create', 'incidents.update', 'incidents.assign', 'incidents.resolve',
+        'incidents.close', 'incidents.reopen', 'incidents.escalate', 'incidents.comment', 'incidents.communicate',
+        'service_requests.view', 'service_requests.create', 'service_requests.update', 'service_requests.submit',
+        'service_requests.approve', 'service_requests.reject', 'service_requests.fulfill',
+        'changes.view', 'changes.create', 'changes.update', 'changes.submit', 'changes.approve', 'changes.reject',
+        'changes.implement', 'changes.complete',
+        'problems.view', 'problems.create', 'problems.update', 'problems.add_rca', 'problems.add_kedb',
+        'cmdb.view', 'cmdb.create', 'cmdb.update', 'cmdb.relationship',
+        'assets.view', 'assets.create', 'assets.update', 'assets.transfer', 'assets.maintenance',
+        'knowledge.create', 'knowledge.update', 'knowledge.publish',
+    },
+    'agent': {
+        'incidents.view', 'incidents.create', 'incidents.update', 'incidents.assign', 'incidents.resolve',
+        'incidents.close', 'incidents.reopen', 'incidents.escalate', 'incidents.comment', 'incidents.communicate',
+        'service_requests.view', 'service_requests.create', 'service_requests.update', 'service_requests.submit',
+        'service_requests.fulfill',
+        'changes.view', 'changes.create', 'changes.update', 'changes.submit',
+        'problems.view', 'problems.create', 'problems.update', 'problems.add_rca', 'problems.add_kedb',
+        'cmdb.view',
+        'assets.view',
+        'knowledge.create', 'knowledge.update',
+    },
+    'asset_manager': {
+        'assets.view', 'assets.create', 'assets.update', 'assets.transfer', 'assets.maintenance',
+        'service_requests.view', 'service_requests.approve', 'service_requests.reject',
+        'cmdb.view', 'cmdb.create', 'cmdb.update', 'cmdb.relationship',
+    },
+    'end_user': {
+        'incidents.view', 'incidents.create', 'incidents.comment',
+        'service_requests.view', 'service_requests.create', 'service_requests.submit',
+        'problems.view', 'problems.create',
+        'changes.view', 'changes.create', 'changes.submit',
+    },
 }
 
 
@@ -161,3 +205,9 @@ def require_permission(permission):
             return view_func(request, *args, **kwargs)
         return wrapper
     return decorator
+
+
+def permission_required(permission):
+    class PermissionCheck(HasPermission):
+        required_permission = permission
+    return PermissionCheck

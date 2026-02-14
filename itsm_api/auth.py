@@ -2,7 +2,7 @@
 Authentication API - JWT authentication endpoints
 """
 import logging
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone as dt_timezone
 from rest_framework import status, viewsets
 from rest_framework.decorators import api_view, permission_classes
 from rest_framework.permissions import AllowAny, IsAuthenticated
@@ -127,6 +127,22 @@ def _notify_admins_of_lockout(user, request, reason):
         )
     except Exception as exc:
         security_logger.warning('Admin lockout email failed: %s', exc)
+
+
+def _is_token_stale(user, token):
+    password_changed_at = getattr(user, 'password_changed_at', None)
+    if not password_changed_at:
+        return False
+
+    if timezone.is_naive(password_changed_at):
+        password_changed_at = timezone.make_aware(password_changed_at, dt_timezone.utc)
+
+    issued_at = token.get('iat')
+    if not issued_at:
+        return True
+
+    issued_at_dt = datetime.fromtimestamp(int(issued_at), tz=dt_timezone.utc)
+    return issued_at_dt < password_changed_at
 
 
 class CustomTokenObtainPairSerializer(TokenObtainPairSerializer):
@@ -428,6 +444,24 @@ def refresh_token(request):
             }, status=status.HTTP_400_BAD_REQUEST)
         
         token = RefreshToken(refresh_token)
+        user_id = token.get('user_id')
+        if not user_id:
+            return Response({
+                'error': 'Invalid refresh token'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        try:
+            user = User.objects.get(id=user_id)
+        except User.DoesNotExist:
+            return Response({
+                'error': 'Invalid refresh token'
+            }, status=status.HTTP_401_UNAUTHORIZED)
+
+        if _is_token_stale(user, token):
+            _log_auth_event(user, request, 'token_refresh_rejected', status_value='warning', error_message='Token stale')
+            return Response({
+                'error': 'Token is no longer valid. Please sign in again.'
+            }, status=status.HTTP_401_UNAUTHORIZED)
         
         return Response({
             'access': str(token.access_token),
