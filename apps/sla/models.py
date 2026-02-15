@@ -17,9 +17,25 @@ class SLAPolicy(AuditModel):
     description = models.TextField(blank=True)
     
     # Applicability
+    SLA_TYPE_CHOICES = [
+        ('incident', 'Incident'),
+        ('service_request', 'Service Request'),
+    ]
+    applies_to_type = models.CharField(
+        max_length=20,
+        choices=SLA_TYPE_CHOICES,
+        default='incident'
+    )
     service = models.ForeignKey(
         'service_requests.Service',
         on_delete=models.CASCADE,
+        null=True,
+        blank=True,
+        related_name='sla_policies'
+    )
+    service_category = models.ForeignKey(
+        'service_requests.ServiceCategory',
+        on_delete=models.SET_NULL,
         null=True,
         blank=True,
         related_name='sla_policies'
@@ -34,6 +50,30 @@ class SLAPolicy(AuditModel):
             ('low', 'Low'),
         ],
         blank=True
+    )
+    incident_impact = models.IntegerField(
+        choices=[(1, 'High'), (2, 'Medium'), (3, 'Low')],
+        null=True,
+        blank=True
+    )
+    incident_urgency = models.IntegerField(
+        choices=[(1, 'High'), (2, 'Medium'), (3, 'Low')],
+        null=True,
+        blank=True
+    )
+    requester = models.ForeignKey(
+        'users.User',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sla_policies'
+    )
+    requester_department = models.ForeignKey(
+        'organizations.Department',
+        on_delete=models.SET_NULL,
+        null=True,
+        blank=True,
+        related_name='sla_policies'
     )
     
     # Response Time (in minutes)
@@ -166,8 +206,17 @@ class SLAEscalation(AuditModel):
         (2, 'Level 2'),
         (3, 'Level 3'),
     ]
+    BREACH_TYPE = [
+        ('response', 'Response Time'),
+        ('resolution', 'Resolution Time'),
+    ]
     level = models.IntegerField(choices=ESCALATION_LEVEL)
     escalate_after_minutes = models.IntegerField()
+    breach_type = models.CharField(
+        max_length=20,
+        choices=BREACH_TYPE,
+        default='resolution'
+    )
     
     # Action
     escalate_to_team = models.ForeignKey(
@@ -189,7 +238,7 @@ class SLAEscalation(AuditModel):
     action_description = models.TextField(blank=True)
     
     class Meta:
-        unique_together = ['sla_policy', 'level']
+        unique_together = ['sla_policy', 'level', 'breach_type']
         ordering = ['level']
 
 

@@ -133,6 +133,7 @@ class ServiceRequest(AuditModel):
     approved_at = models.DateTimeField(null=True, blank=True)
     fulfilled_at = models.DateTimeField(null=True, blank=True)
     due_date = models.DateTimeField(null=True, blank=True)
+    first_response_at = models.DateTimeField(null=True, blank=True)
 
     # SLA
     sla_policy = models.ForeignKey(
@@ -142,8 +143,12 @@ class ServiceRequest(AuditModel):
         blank=True,
         related_name='service_requests'
     )
+    sla_response_due_date = models.DateTimeField(null=True, blank=True)
+    sla_response_breach = models.BooleanField(default=False)
     sla_due_date = models.DateTimeField(null=True, blank=True)
     sla_breach = models.BooleanField(default=False)
+    sla_paused_at = models.DateTimeField(null=True, blank=True)
+    sla_pause_total_minutes = models.IntegerField(default=0)
     
     # Priority
     priority = models.IntegerField(choices=[(1, 'High'), (2, 'Medium'), (3, 'Low')], default=2)
@@ -152,16 +157,28 @@ class ServiceRequest(AuditModel):
         now = now or timezone.now()
         closed_statuses = {'fulfilled', 'closed', 'rejected'}
         should_check = self.status not in closed_statuses
+        if self.sla_paused_at:
+            should_check = False
 
         if not self.sla_due_date:
-            return False
+            if not self.sla_response_due_date:
+                return False
 
-        breach = self.sla_breach or (should_check and now > self.sla_due_date)
-        if breach != self.sla_breach:
-            self.sla_breach = breach
-            return True
+        updated = False
 
-        return False
+        if self.sla_response_due_date:
+            breach = self.sla_response_breach or (should_check and now > self.sla_response_due_date)
+            if breach != self.sla_response_breach:
+                self.sla_response_breach = breach
+                updated = True
+
+        if self.sla_due_date:
+            breach = self.sla_breach or (should_check and now > self.sla_due_date)
+            if breach != self.sla_breach:
+                self.sla_breach = breach
+                updated = True
+
+        return updated
     
     class Meta:
         ordering = ['-created_at']

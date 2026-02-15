@@ -152,8 +152,17 @@ class Incident(AuditModel):
         blank=True,
         related_name='incidents'
     )
+    sla_coverage = models.CharField(
+        max_length=20,
+        choices=[('24x7', '24x7'), ('business', 'Business Hours (9-5)'), ('extended', 'Extended Hours (8-8)')],
+        default='24x7'
+    )
+    sla_response_due_date = models.DateTimeField(null=True, blank=True)
+    sla_response_breach = models.BooleanField(default=False)
     sla_due_date = models.DateTimeField(null=True, blank=True)
     sla_escalated = models.BooleanField(default=False)
+    sla_paused_at = models.DateTimeField(null=True, blank=True)
+    sla_pause_total_minutes = models.IntegerField(default=0)
     ola_target_minutes = models.IntegerField(null=True, blank=True)
     uc_target_minutes = models.IntegerField(null=True, blank=True)
     ola_due_date = models.DateTimeField(null=True, blank=True)
@@ -234,6 +243,8 @@ class Incident(AuditModel):
     def update_breach_status(self, now=None):
         now = now or timezone.now()
         should_check = self.status not in [IncidentStatus.RESOLVED, IncidentStatus.CLOSED]
+        if self.sla_paused_at:
+            should_check = False
         updated = False
 
         if self.ola_due_date:
@@ -246,6 +257,18 @@ class Incident(AuditModel):
             breach = self.uc_breach or (should_check and now > self.uc_due_date)
             if breach != self.uc_breach:
                 self.uc_breach = breach
+                updated = True
+
+        if self.sla_response_due_date:
+            breach = self.sla_response_breach or (should_check and now > self.sla_response_due_date)
+            if breach != self.sla_response_breach:
+                self.sla_response_breach = breach
+                updated = True
+
+        if self.sla_due_date:
+            breach = self.sla_breach or (should_check and now > self.sla_due_date)
+            if breach != self.sla_breach:
+                self.sla_breach = breach
                 updated = True
 
         return updated

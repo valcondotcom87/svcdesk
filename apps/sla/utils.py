@@ -1,117 +1,157 @@
-"""
-SLA Utils - Helper functions for SLA calculation
-"""
+"""SLA matching and due date helpers."""
 from datetime import timedelta
 from django.utils import timezone
-from apps.sla.models import SLAPolicy, SLATarget, SLAMetrics
+
+from apps.sla.models import SLAPolicy, SLATarget
+from apps.organizations.models import DepartmentMember
 
 
-def get_applicable_sla(organization, module, priority):
-    """Get applicable SLA target for a ticket"""
-    policy = SLAPolicy.objects.filter(
-        organization=organization,
-        is_active=True,
-        applicable_modules__contains=module
-    ).first()
-    
-    if not policy:
-        return None
-    
-    target = SLATarget.objects.filter(
-        policy=policy,
-        priority=priority
-    ).first()
-    
-    return target
+def _priority_to_severity(priority_value, is_incident=True):
+    if is_incident:
+        mapping = {
+            1: 'critical',
+            2: 'high',
+            3: 'medium',
+            4: 'low',
+        }
+        return mapping.get(priority_value, 'medium')
 
-
-def create_sla_metrics(organization, ticket_type, ticket_id, priority, created_at=None):
-    """Create SLA metrics for a new ticket"""
-    if created_at is None:
-        created_at = timezone.now()
-    
-    # Get module and SLA policy
-    module_map = {
-        'incident': 'incidents',
-        'service_request': 'service_requests',
-        'problem': 'problems',
-        'change': 'changes',
+    mapping = {
+        1: 'high',
+        2: 'medium',
+        3: 'low',
     }
-    module = module_map.get(ticket_type, ticket_type)
-    
-    target = get_applicable_sla(organization, module, priority)
-    
-    if not target:
+    return mapping.get(priority_value, 'medium')
+
+
+def _department_match(user, department):
+    if not user or not department:
+        return False
+    return DepartmentMember.objects.filter(user=user, department=department).exists()
+
+
+def _score_policy(policy):
+    score = 0
+    for field in (
+        'service',
+        'service_category',
+        'incident_category',
+        'applies_to_priority',
+        'incident_impact',
+        'incident_urgency',
+        'requester',
+        'requester_department',
+    ):
+        if getattr(policy, field, None):
+            score += 1
+    return score
+
+
+def _select_policy(policies):
+    ranked = sorted(policies, key=lambda item: (-item[0], item[1].id))
+    return ranked[0][1] if ranked else None
+
+
+def select_sla_policy_for_incident(incident):
+    if not incident.organization_id:
         return None
-    
-    # Calculate due dates
-    response_due = created_at + timedelta(hours=target.response_time_hours)
-    resolution_due = created_at + timedelta(hours=target.resolution_time_hours)
-    
-    # Create metrics
-    metrics = SLAMetrics.objects.create(
-        organization=organization,
-        ticket_type=ticket_type,
-        ticket_id=ticket_id,
-        sla_policy=target.policy,
-        sla_target=target,
-        created_at_override=created_at,
-        response_due_at=response_due,
-        resolution_due_at=resolution_due,
+
+    policies = SLAPolicy.objects.filter(
+        organization_id=incident.organization_id,
+        is_active=True,
+        applies_to_type='incident',
     )
-    
-    return metrics
+    candidates = []
+    for policy in policies:
+        if policy.incident_category and policy.incident_category != (incident.category or ''):
+            continue
+        if policy.applies_to_priority:
+            severity = _priority_to_severity(incident.priority, is_incident=True)
+            if policy.applies_to_priority != severity:
+                continue
+        if policy.incident_impact and policy.incident_impact != incident.impact:
+            continue
+        if policy.incident_urgency and policy.incident_urgency != incident.urgency:
+            continue
+        if policy.requester and policy.requester_id != incident.requester_id:
+            continue
+        if policy.requester_department and not _department_match(incident.requester, policy.requester_department):
+            continue
+        candidates.append((_score_policy(policy), policy))
+
+    return _select_policy(candidates)
 
 
-def update_sla_metrics(organization, ticket_type, ticket_id, status=None, resolved=False):
-    """Update SLA metrics when ticket status changes"""
-    try:
-        metrics = SLAMetrics.objects.get(
-            organization=organization,
-            ticket_type=ticket_type,
-            ticket_id=ticket_id
-        )
-    except SLAMetrics.DoesNotExist:
+def select_sla_policy_for_service_request(service_request):
+    if not service_request.organization_id:
         return None
-    
-    now = timezone.now()
-    
-    # Mark first response
-    if not metrics.first_response_at and status in ['assigned', 'acknowledged', 'in_progress']:
-        metrics.first_response_at = now
-        if metrics.response_due_at and now > metrics.response_due_at:
-            metrics.response_breached = True
-    
-    # Mark resolution
-    if resolved and not metrics.resolution_at:
-        metrics.resolution_at = now
-        if metrics.resolution_due_at and now > metrics.resolution_due_at:
-            metrics.resolution_breached = True
-    
-    metrics.save(update_fields=[
-        'first_response_at', 'response_breached',
-        'resolution_at', 'resolution_breached'
-    ])
-    
-    return metrics
+
+    policies = SLAPolicy.objects.filter(
+        organization_id=service_request.organization_id,
+        is_active=True,
+        applies_to_type='service_request',
+    )
+    candidates = []
+    for policy in policies:
+        if policy.service_id and policy.service_id != service_request.service_id:
+            continue
+        if policy.service_category_id:
+            service_category_id = getattr(service_request.service, 'category_id', None)
+            if policy.service_category_id != service_category_id:
+                continue
+        if policy.applies_to_priority:
+            severity = _priority_to_severity(service_request.priority, is_incident=False)
+            if policy.applies_to_priority != severity:
+                continue
+        if policy.requester and policy.requester_id != service_request.requester_id:
+            continue
+        if policy.requester_department and not _department_match(service_request.requester, policy.requester_department):
+            continue
+        candidates.append((_score_policy(policy), policy))
+
+    return _select_policy(candidates)
 
 
-def check_sla_breaches():
-    """Periodic task to check for SLA breaches and trigger escalations"""
-    now = timezone.now()
-    
-    # Check for response breaches that haven't been marked yet
-    breached = SLAMetrics.objects.filter(
-        response_due_at__lt=now,
-        first_response_at__isnull=True,
-        response_breached=False
-    ).update(response_breached=True)
-    
-    # Check for resolution breaches
-    breached_res = SLAMetrics.objects.filter(
-        resolution_due_at__lt=now,
-        resolution_at__isnull=True,
-        resolution_breached=False
-    ).update(resolution_breached=True)
-    
-    return breached + breached_res
+def resolve_sla_targets(policy, severity):
+    if not policy:
+        return None, None
+    target = SLATarget.objects.filter(sla_policy=policy, severity=severity).first()
+    if target:
+        return target.response_time_minutes, target.resolution_time_minutes
+    return policy.response_time, policy.resolution_time
+
+
+def apply_sla_dates(instance, response_minutes, resolution_minutes, base_time=None):
+    if response_minutes is None and resolution_minutes is None:
+        return []
+    base_time = base_time or timezone.now()
+    updated = []
+    if response_minutes is not None:
+        instance.sla_response_due_date = base_time + timedelta(minutes=response_minutes)
+        updated.append('sla_response_due_date')
+    if resolution_minutes is not None:
+        instance.sla_due_date = base_time + timedelta(minutes=resolution_minutes)
+        updated.append('sla_due_date')
+    return updated
+
+
+def apply_sla_pause(instance, should_pause, now=None):
+    now = now or timezone.now()
+    updated = []
+    if should_pause and not instance.sla_paused_at:
+        instance.sla_paused_at = now
+        updated.append('sla_paused_at')
+        return updated
+
+    if not should_pause and instance.sla_paused_at:
+        paused_minutes = int((now - instance.sla_paused_at).total_seconds() / 60)
+        instance.sla_pause_total_minutes += max(paused_minutes, 0)
+        instance.sla_paused_at = None
+        if instance.sla_response_due_date:
+            instance.sla_response_due_date += timedelta(minutes=paused_minutes)
+            updated.append('sla_response_due_date')
+        if instance.sla_due_date:
+            instance.sla_due_date += timedelta(minutes=paused_minutes)
+            updated.append('sla_due_date')
+        updated.extend(['sla_pause_total_minutes', 'sla_paused_at'])
+    return updated

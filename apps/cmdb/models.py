@@ -40,6 +40,24 @@ class ConfigurationItem(AuditModel):
         related_name='items'
     )
     
+    # Classification
+    CI_CLASS_CHOICES = [
+        ('service', 'Service'),
+        ('application', 'Application'),
+        ('infrastructure', 'Infrastructure'),
+        ('hardware', 'Hardware'),
+        ('software', 'Software'),
+        ('network', 'Network'),
+        ('data', 'Data'),
+        ('documentation', 'Documentation'),
+        ('other', 'Other'),
+    ]
+    ci_class = models.CharField(
+        max_length=20,
+        choices=CI_CLASS_CHOICES,
+        default='service'
+    )
+
     # Details
     description = models.TextField(blank=True)
     type = models.CharField(max_length=100)  # Hardware, Software, Service, etc.
@@ -54,6 +72,46 @@ class ConfigurationItem(AuditModel):
         default='active',
         db_index=True
     )
+
+    LIFECYCLE_STAGE_CHOICES = [
+        ('planned', 'Planned'),
+        ('design', 'Design'),
+        ('build', 'Build'),
+        ('test', 'Test'),
+        ('in_operation', 'In Operation'),
+        ('deprecated', 'Deprecated'),
+        ('retired', 'Retired'),
+    ]
+    lifecycle_stage = models.CharField(
+        max_length=20,
+        choices=LIFECYCLE_STAGE_CHOICES,
+        default='in_operation'
+    )
+
+    CRITICALITY_CHOICES = [
+        ('low', 'Low'),
+        ('medium', 'Medium'),
+        ('high', 'High'),
+        ('critical', 'Critical'),
+    ]
+    criticality = models.CharField(
+        max_length=20,
+        choices=CRITICALITY_CHOICES,
+        default='medium'
+    )
+
+    VERIFICATION_STATUS_CHOICES = [
+        ('unverified', 'Unverified'),
+        ('pending_review', 'Pending Review'),
+        ('verified', 'Verified'),
+    ]
+    verification_status = models.CharField(
+        max_length=20,
+        choices=VERIFICATION_STATUS_CHOICES,
+        default='unverified'
+    )
+    last_verified_at = models.DateTimeField(null=True, blank=True)
+    last_audit_at = models.DateTimeField(null=True, blank=True)
     
     # Ownership
     owner_team = models.ForeignKey(

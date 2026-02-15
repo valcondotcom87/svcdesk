@@ -33,7 +33,7 @@ class SLAEscalationSerializer(serializers.ModelSerializer):
     class Meta:
         model = SLAEscalation
         fields = [
-            'id', 'sla_policy', 'level', 'escalate_after_minutes',
+            'id', 'sla_policy', 'level', 'breach_type', 'escalate_after_minutes',
             'escalate_to_team', 'escalate_to_team_name',
             'escalate_to_user', 'escalate_to_user_name',
             'notify_managers', 'action_description'
@@ -71,7 +71,7 @@ class SLAPolicyListSerializer(serializers.ModelSerializer):
     class Meta:
         model = SLAPolicy
         fields = [
-            'id', 'name', 'description', 'service', 'coverage',
+            'id', 'name', 'description', 'applies_to_type', 'service', 'service_category', 'coverage',
             'response_time', 'resolution_time', 'target_count', 'is_active'
         ]
 
@@ -92,7 +92,9 @@ class SLAPolicyDetailSerializer(serializers.ModelSerializer):
         model = SLAPolicy
         fields = [
             'id', 'organization', 'name', 'description', 'service', 'service_name',
-            'incident_category', 'applies_to_priority', 'response_time',
+            'service_category', 'incident_category', 'applies_to_type', 'applies_to_priority',
+            'incident_impact', 'incident_urgency', 'requester', 'requester_department',
+            'response_time',
             'resolution_time', 'coverage', 'coverage_display',
             'targets', 'escalations', 'metrics',
             'is_active', 'created_at', 'updated_at'
@@ -105,7 +107,8 @@ class SLAPolicyCreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = SLAPolicy
         fields = [
-            'name', 'description', 'service', 'incident_category',
-            'applies_to_priority', 'response_time', 'resolution_time',
+            'name', 'description', 'applies_to_type', 'service', 'service_category',
+            'incident_category', 'applies_to_priority', 'incident_impact', 'incident_urgency',
+            'requester', 'requester_department', 'response_time', 'resolution_time',
             'coverage', 'is_active'
         ]

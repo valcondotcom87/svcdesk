@@ -52,7 +52,16 @@ class CIViewSet(viewsets.ModelViewSet):
     queryset = CI.objects.filter(deleted_at__isnull=True)
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['organization', 'category', 'status', 'owner_team']
+    filterset_fields = [
+        'organization',
+        'category',
+        'status',
+        'owner_team',
+        'ci_class',
+        'lifecycle_stage',
+        'criticality',
+        'verification_status',
+    ]
     search_fields = ['name', 'serial_number']
     ordering_fields = ['name', 'created_at']
     ordering = ['name']

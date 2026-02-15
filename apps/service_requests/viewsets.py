@@ -6,8 +6,9 @@ from rest_framework.decorators import action
 from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError, PermissionDenied
-from django.db.models import Q
+from django.db.models import Avg, Count, DurationField, ExpressionWrapper, F, Q, Value
 from django.utils import timezone
+from django.db.models.functions import Coalesce, TruncMonth
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.service_requests.models import (
@@ -27,6 +28,13 @@ from apps.core.permissions import permission_required
 from apps.workflows.utils import (
     ensure_workflow_instance_for_service_request,
     advance_workflow,
+)
+from apps.sla.utils import (
+    apply_sla_dates,
+    apply_sla_pause,
+    resolve_sla_targets,
+    select_sla_policy_for_service_request,
+    _priority_to_severity,
 )
 
 
@@ -193,20 +201,20 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
         if page is not None:
             for item in page:
                 if item.update_breach_status():
-                    item.save(update_fields=['sla_breach'])
+                    item.save(update_fields=['sla_breach', 'sla_response_breach'])
             serializer = self.get_serializer(page, many=True)
             return self.get_paginated_response(serializer.data)
 
         for item in queryset:
             if item.update_breach_status():
-                item.save(update_fields=['sla_breach'])
+                item.save(update_fields=['sla_breach', 'sla_response_breach'])
         serializer = self.get_serializer(queryset, many=True)
         return Response(serializer.data)
 
     def retrieve(self, request, *args, **kwargs):
         service_request = self.get_object()
         if service_request.update_breach_status():
-            service_request.save(update_fields=['sla_breach'])
+            service_request.save(update_fields=['sla_breach', 'sla_response_breach'])
         serializer = self.get_serializer(service_request)
         return Response(serializer.data)
     
@@ -258,6 +266,13 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
         category_text = f"{module_category.name} {module_category.description}".lower()
         return any(keyword in category_text for keyword in ['hardware', 'device', 'devices', 'perangkat', 'asset'])
 
+    def _ensure_same_org(self, service_request, user):
+        if user.is_superuser:
+            return
+        user_org = getattr(user, 'organization', None)
+        if not user_org or user_org.name != service_request.organization.name:
+            raise PermissionDenied('User must belong to the same organization.')
+
     def _required_approval_levels(self, service_request):
         levels = [{'level': 1, 'role': 'manager'}]
         if self._is_device_request(service_request):
@@ -268,6 +283,7 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
     def submit(self, request, pk=None):
         """Submit a service request"""
         service_request = self.get_object()
+        self._ensure_same_org(service_request, request.user)
         if service_request.status not in ['draft', 'rejected']:
             return Response(
                 {'detail': 'Only draft or rejected requests can be submitted.'},
@@ -305,6 +321,25 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
 
         service_request.save(update_fields=['status', 'submitted_at'])
 
+        if not service_request.sla_policy:
+            policy = select_sla_policy_for_service_request(service_request)
+            if policy:
+                service_request.sla_policy = policy
+                severity = _priority_to_severity(service_request.priority, is_incident=False)
+                response_minutes, resolution_minutes = resolve_sla_targets(policy, severity)
+                updated = ['sla_policy']
+                updated.extend(apply_sla_dates(
+                    service_request,
+                    response_minutes,
+                    resolution_minutes,
+                    service_request.submitted_at or service_request.created_at
+                ))
+                service_request.save(update_fields=sorted(set(updated)))
+
+        pause_fields = apply_sla_pause(service_request, True)
+        if pause_fields:
+            service_request.save(update_fields=sorted(set(pause_fields)))
+
         instance = ensure_workflow_instance_for_service_request(service_request, user=request.user)
         advance_workflow(instance, status=service_request.status, user=request.user)
         return Response({'detail': f'Request {service_request.ticket_number} submitted'})
@@ -313,6 +348,7 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
     def approve(self, request, pk=None):
         """Approve a service request"""
         service_request = self.get_object()
+        self._ensure_same_org(service_request, request.user)
         comments = request.data.get('comments', '')
 
         if service_request.status not in ['pending_approval', 'submitted']:
@@ -346,7 +382,11 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
         else:
             service_request.status = 'approved'
             service_request.approved_at = timezone.now()
-            service_request.save(update_fields=['status', 'approved_at'])
+            if service_request.first_response_at is None:
+                service_request.first_response_at = timezone.now()
+                service_request.save(update_fields=['status', 'approved_at', 'first_response_at'])
+            else:
+                service_request.save(update_fields=['status', 'approved_at'])
 
         instance = ensure_workflow_instance_for_service_request(service_request, user=request.user)
         advance_workflow(instance, status='approved', user=request.user, notes=comments)
@@ -356,6 +396,7 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
     def reject(self, request, pk=None):
         """Reject a service request"""
         service_request = self.get_object()
+        self._ensure_same_org(service_request, request.user)
         comments = request.data.get('comments', '')
 
         if service_request.status not in ['pending_approval', 'submitted']:
@@ -394,6 +435,7 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
     def complete(self, request, pk=None):
         """Complete a service request"""
         service_request = self.get_object()
+        self._ensure_same_org(service_request, request.user)
         if service_request.status not in ['approved', 'in_progress', 'pending_fulfillment']:
             return Response(
                 {'detail': 'Request must be approved before fulfillment.'},
@@ -405,6 +447,105 @@ class ServiceRequestViewSet(viewsets.ModelViewSet):
         instance = ensure_workflow_instance_for_service_request(service_request, user=request.user)
         advance_workflow(instance, status='fulfilled', user=request.user, complete=True)
         return Response({'detail': f'Request {service_request.ticket_number} fulfilled'})
+
+    @action(detail=False, methods=['get'])
+    def report(self, request):
+        """Service request reporting metrics for month/year and status breakdowns."""
+        now = timezone.now()
+        try:
+            month = int(request.query_params.get('month', now.month))
+            year = int(request.query_params.get('year', now.year))
+        except ValueError:
+            return Response({'detail': 'Invalid month or year.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if month < 1 or month > 12:
+            return Response({'detail': 'Month must be between 1 and 12.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        queryset = self.get_queryset()
+
+        active_statuses = ['submitted', 'pending_approval', 'approved', 'in_progress', 'pending_fulfillment']
+        fulfilled_statuses = ['fulfilled', 'closed']
+        failed_statuses = ['rejected']
+
+        report_queryset = queryset.exclude(status='draft')
+
+        raised_month_count = report_queryset.filter(
+            submitted_at__year=year,
+            submitted_at__month=month
+        ).count()
+        raised_year_count = report_queryset.filter(submitted_at__year=year).count()
+
+        active_count = report_queryset.filter(status__in=active_statuses).count()
+        fulfilled_count = report_queryset.filter(status__in=fulfilled_statuses).count()
+        waiting_approval_count = report_queryset.filter(status='pending_approval').count()
+        failed_count = report_queryset.filter(status__in=failed_statuses).count()
+
+        active_age_qs = report_queryset.filter(status__in=active_statuses)
+        avg_age = active_age_qs.aggregate(
+            avg_age=Avg(
+                ExpressionWrapper(
+                    now - Coalesce('submitted_at', 'created_at'),
+                    output_field=DurationField()
+                )
+            )
+        )['avg_age']
+        avg_age_days = round(avg_age.total_seconds() / 86400, 2) if avg_age else 0
+
+        category_counts = (
+            report_queryset
+            .annotate(category_name=Coalesce('service__category__name', Value('Uncategorized')))
+            .values('category_name')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+
+        top_categories = [
+            {'category': item['category_name'], 'count': item['count']}
+            for item in category_counts[:10]
+        ]
+
+        status_breakdown = (
+            report_queryset.values('status')
+            .annotate(count=Count('id'))
+            .order_by('status')
+        )
+
+        status_counts = {item['status']: item['count'] for item in status_breakdown}
+        for status_code, _ in ServiceRequest.STATUS_CHOICES:
+            status_counts.setdefault(status_code, 0)
+
+        monthly_breakdown = (
+            report_queryset.filter(submitted_at__year=year)
+            .annotate(month=TruncMonth('submitted_at'))
+            .values('month')
+            .annotate(count=Count('id'))
+            .order_by('month')
+        )
+        monthly_counts = [
+            {'month': item['month'].strftime('%Y-%m'), 'count': item['count']}
+            for item in monthly_breakdown
+        ]
+
+        payload = {
+            'period': {'month': month, 'year': year},
+            'raised': {
+                'month': raised_month_count,
+                'year': raised_year_count,
+            },
+            'active_service_requests': active_count,
+            'fulfilled_service_requests': fulfilled_count,
+            'waiting_approval_service_requests': waiting_approval_count,
+            'failed_service_requests': failed_count,
+            'average_age_days': avg_age_days,
+            'top_request_categories': top_categories,
+            'service_requests_by_status': status_counts,
+            'service_requests_by_month': monthly_counts,
+            'fulfilled_statuses': fulfilled_statuses,
+            'active_statuses': active_statuses,
+            'failed_statuses': failed_statuses,
+        }
+
+        return Response(payload)
 
 
 class ServiceRequestItemViewSet(viewsets.ModelViewSet):

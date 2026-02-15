@@ -16,11 +16,27 @@ def check_sla_breaches():
         sla_due_date__isnull=False,
         sla_due_date__lt=now,
         sla_breach=False,
+        sla_paused_at__isnull=True,
+    )
+    response_incidents = Incident.objects.filter(
+        sla_response_due_date__isnull=False,
+        sla_response_due_date__lt=now,
+        sla_response_breach=False,
+        sla_paused_at__isnull=True,
+        first_response_time__isnull=True,
     )
     breached_requests = ServiceRequest.objects.filter(
         sla_due_date__isnull=False,
         sla_due_date__lt=now,
         sla_breach=False,
+        sla_paused_at__isnull=True,
+    )
+    response_requests = ServiceRequest.objects.filter(
+        sla_response_due_date__isnull=False,
+        sla_response_due_date__lt=now,
+        sla_response_breach=False,
+        sla_paused_at__isnull=True,
+        first_response_at__isnull=True,
     )
 
     for incident in breached_incidents:
@@ -34,6 +50,22 @@ def check_sla_breaches():
                 "sla_policy": incident.sla_policy,
                 "breach_type": "resolution",
                 "target_time": incident.sla_due_date,
+                "breached_at": now,
+                "breach_duration_minutes": max(duration_minutes, 0),
+            },
+        )
+
+    for incident in response_incidents:
+        incident.sla_response_breach = True
+        incident.save(update_fields=["sla_response_breach"])
+        duration_minutes = int((now - incident.sla_response_due_date).total_seconds() / 60)
+        SLABreach.objects.get_or_create(
+            organization=incident.organization,
+            incident=incident,
+            defaults={
+                "sla_policy": incident.sla_policy,
+                "breach_type": "response",
+                "target_time": incident.sla_response_due_date,
                 "breached_at": now,
                 "breach_duration_minutes": max(duration_minutes, 0),
             },
@@ -55,9 +87,27 @@ def check_sla_breaches():
             },
         )
 
+    for request in response_requests:
+        request.sla_response_breach = True
+        request.save(update_fields=["sla_response_breach"])
+        duration_minutes = int((now - request.sla_response_due_date).total_seconds() / 60)
+        SLABreach.objects.get_or_create(
+            organization=request.organization,
+            service_request=request,
+            defaults={
+                "sla_policy": request.sla_policy,
+                "breach_type": "response",
+                "target_time": request.sla_response_due_date,
+                "breached_at": now,
+                "breach_duration_minutes": max(duration_minutes, 0),
+            },
+        )
+
     return {
         "incident_breaches": breached_incidents.count(),
+        "incident_response_breaches": response_incidents.count(),
         "service_request_breaches": breached_requests.count(),
+        "service_request_response_breaches": response_requests.count(),
     }
 
 
@@ -71,17 +121,37 @@ def send_sla_warnings():
         sla_due_date__lte=warning_window,
         sla_due_date__gte=now,
         sla_breach=False,
+        sla_paused_at__isnull=True,
+    ).count()
+    incident_response_due = Incident.objects.filter(
+        sla_response_due_date__isnull=False,
+        sla_response_due_date__lte=warning_window,
+        sla_response_due_date__gte=now,
+        sla_response_breach=False,
+        sla_paused_at__isnull=True,
+        first_response_time__isnull=True,
     ).count()
     request_due = ServiceRequest.objects.filter(
         sla_due_date__isnull=False,
         sla_due_date__lte=warning_window,
         sla_due_date__gte=now,
         sla_breach=False,
+        sla_paused_at__isnull=True,
+    ).count()
+    request_response_due = ServiceRequest.objects.filter(
+        sla_response_due_date__isnull=False,
+        sla_response_due_date__lte=warning_window,
+        sla_response_due_date__gte=now,
+        sla_response_breach=False,
+        sla_paused_at__isnull=True,
+        first_response_at__isnull=True,
     ).count()
 
     return {
         "incident_warnings": incident_due,
+        "incident_response_warnings": incident_response_due,
         "service_request_warnings": request_due,
+        "service_request_response_warnings": request_response_due,
     }
 
 
@@ -105,10 +175,20 @@ def auto_escalate_tickets():
             # Find unresolved tickets matching this policy
             incidents = Incident.objects.filter(
                 sla_policy=escalation.sla_policy,
-                status__in=["new", "assigned", "pending"],
-                created_at__lte=now
-                - timedelta(minutes=escalation.escalate_after_minutes),
+                sla_paused_at__isnull=True,
+                status__in=["new", "assigned", "acknowledged", "in_progress", "on_hold"],
             )
+            if escalation.breach_type == "response":
+                incidents = incidents.filter(
+                    sla_response_due_date__isnull=False,
+                    sla_response_due_date__lte=now - timedelta(minutes=escalation.escalate_after_minutes),
+                    first_response_time__isnull=True,
+                )
+            else:
+                incidents = incidents.filter(
+                    sla_due_date__isnull=False,
+                    sla_due_date__lte=now - timedelta(minutes=escalation.escalate_after_minutes),
+                )
 
             for incident in incidents:
                 # Check if already escalated to this level
@@ -176,6 +256,7 @@ def auto_escalate_tickets():
             sla_due_date__isnull=False,
             sla_due_date__lt=now,
             sla_breach=True,
+            sla_paused_at__isnull=True,
         )
 
         for request in escalated_requests:

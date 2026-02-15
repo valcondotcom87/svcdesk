@@ -2,6 +2,8 @@
 Incident Serializers - REST API serializers for incident management
 """
 from datetime import timedelta
+import os
+from django.conf import settings
 from django.utils import timezone
 from rest_framework import serializers
 from rest_framework.exceptions import ValidationError
@@ -10,6 +12,13 @@ from apps.incidents.models import (
     IncidentCommunication
 )
 from apps.organizations.models import Organization
+from apps.sla.utils import (
+    apply_sla_dates,
+    apply_sla_pause,
+    resolve_sla_targets,
+    select_sla_policy_for_incident,
+    _priority_to_severity,
+)
 
 
 class IncidentCommentSerializer(serializers.ModelSerializer):
@@ -20,6 +29,11 @@ class IncidentCommentSerializer(serializers.ModelSerializer):
         model = IncidentComment
         fields = ['id', 'incident', 'text', 'is_internal', 'created_by', 'created_by_name', 'created_at']
         read_only_fields = ['created_at']
+
+    def validate_text(self, value):
+        if not str(value).strip():
+            raise ValidationError('Comment text is required.')
+        return value
 
 
 class IncidentWorkaroundSerializer(serializers.ModelSerializer):
@@ -34,6 +48,31 @@ class IncidentAttachmentSerializer(serializers.ModelSerializer):
     class Meta:
         model = IncidentAttachment
         fields = ['id', 'incident', 'file', 'filename', 'file_type', 'file_size', 'created_at']
+
+    def validate_file(self, value):
+        if not value:
+            raise ValidationError('File is required.')
+        max_mb = getattr(settings, 'MAX_UPLOAD_SIZE_MB', 10)
+        max_bytes = int(max_mb) * 1024 * 1024
+        if value.size > max_bytes:
+            raise ValidationError(f'File size exceeds {max_mb} MB limit.')
+        return value
+
+    def _populate_file_metadata(self, attrs):
+        uploaded = attrs.get('file')
+        if not uploaded:
+            return
+        attrs['filename'] = os.path.basename(uploaded.name)
+        attrs['file_size'] = uploaded.size
+        attrs['file_type'] = getattr(uploaded, 'content_type', '') or ''
+
+    def create(self, validated_data):
+        self._populate_file_metadata(validated_data)
+        return super().create(validated_data)
+
+    def update(self, instance, validated_data):
+        self._populate_file_metadata(validated_data)
+        return super().update(instance, validated_data)
 
 
 class IncidentCommunicationSerializer(serializers.ModelSerializer):
@@ -104,7 +143,8 @@ class IncidentDetailSerializer(serializers.ModelSerializer):
             'escalation_status', 'major_incident_manager', 'major_incident_manager_name', 'communication_cadence_minutes',
             'next_communication_due', 'resolution_code', 'resolution_notes',
             'first_response_time', 'resolved_at', 'closed_at',
-            'sla_breach', 'sla_policy', 'sla_due_date', 'sla_escalated',
+            'sla_breach', 'sla_policy', 'sla_coverage', 'sla_response_due_date', 'sla_response_breach',
+            'sla_due_date', 'sla_escalated', 'sla_paused_at', 'sla_pause_total_minutes',
             'ola_target_minutes', 'uc_target_minutes', 'ola_due_date', 'uc_due_date',
             'ola_breach', 'uc_breach',
             'pir_required', 'pir_status', 'pir_summary', 'pir_notes',
@@ -149,6 +189,9 @@ class IncidentCreateUpdateSerializer(serializers.ModelSerializer):
 
     def validate(self, attrs):
         instance = getattr(self, 'instance', None)
+        org = self._resolve_org(attrs, instance)
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
 
         category = attrs.get('category') if 'category' in attrs else getattr(instance, 'category', '')
         if not category or not str(category).strip():
@@ -190,7 +233,60 @@ class IncidentCreateUpdateSerializer(serializers.ModelSerializer):
             elif pir_required and not pir_status:
                 attrs['pir_status'] = 'pending'
 
+        requester = attrs.get('requester') if 'requester' in attrs else getattr(instance, 'requester', None)
+        if user and user.role == 'end_user' and requester and requester.id != user.id:
+            raise ValidationError({'requester': 'End users can only set themselves as requester.'})
+
+        if user and user.role == 'end_user' and attrs.get('assigned_to') is not None:
+            raise ValidationError({'assigned_to': 'End users cannot assign incidents.'})
+
+        for field_name in ['requester', 'assigned_to', 'major_incident_manager', 'pir_owner']:
+            value = attrs.get(field_name) if field_name in attrs else getattr(instance, field_name, None)
+            self._validate_user_org(value, org, field_name)
+
+        assigned_team = attrs.get('assigned_to_team') if 'assigned_to_team' in attrs else getattr(instance, 'assigned_to_team', None)
+        self._validate_team_org(assigned_team, org, 'assigned_to_team')
+
+        sla_policy = attrs.get('sla_policy') if 'sla_policy' in attrs else getattr(instance, 'sla_policy', None)
+        self._validate_policy_org(sla_policy, org, 'sla_policy')
+
         return attrs
+
+    def _resolve_org(self, attrs, instance=None):
+        org = attrs.get('organization') if attrs else None
+        if org:
+            return org
+        if instance and getattr(instance, 'organization', None):
+            return instance.organization
+        request = self.context.get('request')
+        user = getattr(request, 'user', None)
+        user_org = getattr(user, 'organization', None) if user else None
+        if user_org:
+            matched = Organization.objects.filter(name=user_org.name).first()
+            if matched:
+                return matched
+        if user and user.is_superuser:
+            return Organization.objects.filter(is_active=True).first()
+        return None
+
+    def _validate_user_org(self, user, org, field_name):
+        if not user or not org:
+            return
+        user_org = getattr(user, 'organization', None)
+        if not user_org or user_org.name != org.name:
+            raise ValidationError({field_name: 'User must belong to the same organization.'})
+
+    def _validate_team_org(self, team, org, field_name):
+        if not team or not org:
+            return
+        if team.organization_id != org.id:
+            raise ValidationError({field_name: 'Team must belong to the same organization.'})
+
+    def _validate_policy_org(self, policy, org, field_name):
+        if not policy or not org:
+            return
+        if getattr(policy, 'organization_id', None) != org.id:
+            raise ValidationError({field_name: 'SLA policy must belong to the same organization.'})
 
     def _apply_ola_uc_targets(self, incident, force=False):
         now = timezone.now()
@@ -243,6 +339,19 @@ class IncidentCreateUpdateSerializer(serializers.ModelSerializer):
         incident.ticket_number = f"{org.slug.upper()}-INC-{count + 1:05d}"
         
         incident.save()
+        if not incident.sla_policy:
+            policy = select_sla_policy_for_incident(incident)
+            if policy:
+                incident.sla_policy = policy
+                if incident.priority == 1 or incident.impact == 1:
+                    incident.sla_coverage = '24x7'
+                else:
+                    incident.sla_coverage = policy.coverage
+                severity = _priority_to_severity(incident.priority, is_incident=True)
+                response_minutes, resolution_minutes = resolve_sla_targets(policy, severity)
+                updated = ['sla_policy', 'sla_coverage']
+                updated.extend(apply_sla_dates(incident, response_minutes, resolution_minutes, incident.created_at))
+                incident.save(update_fields=sorted(set(updated)))
         if incident.pir_status == 'completed' and not incident.pir_completed_at:
             incident.pir_completed_at = timezone.now()
             incident.save(update_fields=['pir_completed_at'])
@@ -250,6 +359,7 @@ class IncidentCreateUpdateSerializer(serializers.ModelSerializer):
         return incident
 
     def update(self, instance, validated_data):
+        previous_status = instance.status
         for attr, value in validated_data.items():
             setattr(instance, attr, value)
 
@@ -262,11 +372,31 @@ class IncidentCreateUpdateSerializer(serializers.ModelSerializer):
         if 'impact' in validated_data or 'urgency' in validated_data:
             instance.calculate_priority()
 
+        if instance.first_response_time is None and instance.status in ['acknowledged', 'assigned', 'in_progress']:
+            instance.first_response_time = timezone.now()
+
         instance.save()
+        pause_fields = []
+        pause_fields.extend(apply_sla_pause(instance, instance.status == 'on_hold'))
+        if pause_fields:
+            instance.save(update_fields=sorted(set(pause_fields)))
         if 'ola_target_minutes' in validated_data or 'uc_target_minutes' in validated_data:
             self._apply_ola_uc_targets(instance, force=True)
         else:
             self._apply_ola_uc_targets(instance, force=False)
+        if not instance.sla_policy:
+            policy = select_sla_policy_for_incident(instance)
+            if policy:
+                instance.sla_policy = policy
+                if instance.priority == 1 or instance.impact == 1:
+                    instance.sla_coverage = '24x7'
+                else:
+                    instance.sla_coverage = policy.coverage
+                severity = _priority_to_severity(instance.priority, is_incident=True)
+                response_minutes, resolution_minutes = resolve_sla_targets(policy, severity)
+                updated = ['sla_policy', 'sla_coverage']
+                updated.extend(apply_sla_dates(instance, response_minutes, resolution_minutes, instance.created_at))
+                instance.save(update_fields=sorted(set(updated)))
         return instance
 
 

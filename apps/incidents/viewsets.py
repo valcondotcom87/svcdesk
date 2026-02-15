@@ -21,6 +21,7 @@ from apps.incidents.serializers import (
     IncidentAttachmentSerializer, IncidentCommunicationSerializer
 )
 from apps.organizations.models import Organization
+from apps.users.models import User
 from apps.core.permissions import permission_required
 from apps.workflows.utils import (
     ensure_workflow_instance_for_incident,
@@ -145,7 +146,7 @@ class IncidentViewSet(viewsets.ModelViewSet):
     def retrieve(self, request, *args, **kwargs):
         incident = self.get_object()
         if incident.update_breach_status():
-            incident.save(update_fields=['ola_breach', 'uc_breach'])
+            incident.save(update_fields=['ola_breach', 'uc_breach', 'sla_breach', 'sla_response_breach'])
         serializer = self.get_serializer(incident)
         return Response(serializer.data)
     
@@ -208,16 +209,30 @@ class IncidentViewSet(viewsets.ModelViewSet):
         """Assign incident to a user"""
         incident = self.get_object()
         assigned_to_id = request.data.get('assigned_to_id')
-        
-        try:
-            incident.assigned_to_id = assigned_to_id
-            incident.status = 'assigned'
-            incident.save()
-            instance = ensure_workflow_instance_for_incident(incident, user=request.user)
-            advance_workflow(instance, status='assigned', user=request.user)
-            return Response({'detail': 'Incident assigned'})
-        except Exception as e:
-            return Response({'error': str(e)}, status=status.HTTP_400_BAD_REQUEST)
+        if not assigned_to_id:
+            return Response({'detail': 'assigned_to_id is required.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        assignee = User.objects.filter(id=assigned_to_id, is_active=True).first()
+        if not assignee:
+            return Response({'detail': 'Assignee not found or inactive.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if assignee.role == 'end_user':
+            return Response({'detail': 'End users cannot be assigned incidents.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if incident.organization and assignee.organization:
+            if assignee.organization.name != incident.organization.name:
+                return Response({'detail': 'Assignee must belong to the same organization.'}, status=status.HTTP_400_BAD_REQUEST)
+        elif incident.organization:
+            return Response({'detail': 'Assignee must belong to the same organization.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        incident.assigned_to = assignee
+        incident.status = 'assigned'
+        if incident.first_response_time is None:
+            incident.first_response_time = timezone.now()
+        incident.save(update_fields=['assigned_to', 'status', 'first_response_time'])
+        instance = ensure_workflow_instance_for_incident(incident, user=request.user)
+        advance_workflow(instance, status='assigned', user=request.user)
+        return Response({'detail': 'Incident assigned'})
     
     @action(detail=True, methods=['post'])
     def escalate(self, request, pk=None):
@@ -244,17 +259,19 @@ class IncidentViewSet(viewsets.ModelViewSet):
     def add_comment(self, request, pk=None):
         """Add a comment to incident"""
         incident = self.get_object()
-        text = request.data.get('text')
-        is_internal = request.data.get('is_internal', False)
-        
-        comment = IncidentComment.objects.create(
-            incident=incident,
-            text=text,
-            is_internal=is_internal,
-            created_by=request.user
-        )
-        
-        serializer = IncidentCommentSerializer(comment)
+        text = request.data.get('text', '')
+        is_internal = bool(request.data.get('is_internal', False))
+        if request.user.role == 'end_user':
+            is_internal = False
+
+        serializer = IncidentCommentSerializer(data={
+            'incident': incident.id,
+            'text': text,
+            'is_internal': is_internal,
+            'created_by': request.user.id,
+        })
+        serializer.is_valid(raise_exception=True)
+        serializer.save()
         return Response(serializer.data, status=status.HTTP_201_CREATED)
 
     @action(detail=True, methods=['post'])

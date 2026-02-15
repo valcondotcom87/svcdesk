@@ -20,7 +20,19 @@ class SLAPolicyViewSet(viewsets.ModelViewSet):
     queryset = SLAPolicy.objects.filter(is_active=True)
     permission_classes = [IsAuthenticated]
     filter_backends = [DjangoFilterBackend, filters.SearchFilter, filters.OrderingFilter]
-    filterset_fields = ['organization', 'service', 'coverage']
+    filterset_fields = [
+        'organization',
+        'applies_to_type',
+        'service',
+        'service_category',
+        'incident_category',
+        'applies_to_priority',
+        'incident_impact',
+        'incident_urgency',
+        'requester',
+        'requester_department',
+        'coverage',
+    ]
     search_fields = ['name', 'description']
     ordering = ['name']
     

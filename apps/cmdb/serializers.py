@@ -55,7 +55,8 @@ class CIListSerializer(serializers.ModelSerializer):
         model = CI
         fields = [
             'id', 'ci_number', 'name', 'category', 'category_name',
-            'type', 'status', 'status_display', 'owner_team', 'owner_team_name',
+            'ci_class', 'type', 'status', 'status_display', 'owner_team', 'owner_team_name',
+            'lifecycle_stage', 'criticality', 'verification_status',
             'serial_number', 'location'
         ]
 
@@ -74,7 +75,9 @@ class CIDetailSerializer(serializers.ModelSerializer):
         model = CI
         fields = [
             'id', 'organization', 'ci_number', 'name', 'description', 'category', 'category_name',
-            'type', 'status', 'status_display', 'owner_team', 'owner_name',
+            'ci_class', 'type', 'status', 'status_display', 'owner_team', 'owner_name',
+            'lifecycle_stage', 'criticality', 'verification_status',
+            'last_verified_at', 'last_audit_at',
             'version', 'manufacturer', 'serial_number',
             'location', 'acquisition_date', 'disposal_date', 'warranty_expiry',
             'attributes', 'related_cis',
@@ -106,7 +109,8 @@ class CICreateUpdateSerializer(serializers.ModelSerializer):
     class Meta:
         model = CI
         fields = [
-            'ci_number', 'name', 'description', 'category', 'type', 'status',
+            'ci_number', 'name', 'description', 'category', 'ci_class', 'type', 'status',
+            'lifecycle_stage', 'criticality', 'verification_status',
             'version', 'manufacturer', 'serial_number', 'owner_team', 'location',
             'acquisition_date', 'disposal_date', 'warranty_expiry',
             'impact_analysis', 'dependency_analysis', 'estimated_downtime_minutes',

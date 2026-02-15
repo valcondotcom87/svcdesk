@@ -7,6 +7,8 @@ from rest_framework.response import Response
 from rest_framework.permissions import IsAuthenticated
 from rest_framework.exceptions import ValidationError
 from django.utils import timezone
+from django.db.models import Count, Q, Value
+from django.db.models.functions import Coalesce
 from django_filters.rest_framework import DjangoFilterBackend
 
 from apps.assets.models import (
@@ -166,6 +168,94 @@ class AssetViewSet(viewsets.ModelViewSet):
         maintenance = asset.assetmaintenance_set.all()
         serializer = AssetMaintenanceSerializer(maintenance, many=True)
         return Response(serializer.data)
+
+    @action(detail=False, methods=['get'])
+    def report(self, request):
+        """Asset dashboard metrics and category breakdowns."""
+        queryset = self.get_queryset()
+        now = timezone.now().date()
+        try:
+            warranty_days = int(request.query_params.get('warranty_days', 90))
+        except ValueError:
+            return Response({'detail': 'warranty_days must be an integer.'}, status=status.HTTP_400_BAD_REQUEST)
+
+        if warranty_days < 1:
+            return Response({'detail': 'warranty_days must be greater than 0.'}, status=status.HTTP_400_BAD_REQUEST)
+        warranty_cutoff = now + timezone.timedelta(days=warranty_days)
+
+        total_assets = queryset.count()
+        hardware_count = queryset.filter(asset_type='hardware').count()
+        software_count = queryset.filter(asset_type='software').count()
+
+        workstation_filter = Q(category__name__iregex=r'(workstation|desktop|laptop)') | Q(name__iregex=r'(workstation|desktop|laptop)')
+        workstations_count = queryset.filter(workstation_filter).count()
+
+        purchase_orders_count = queryset.filter(
+            Q(category__name__iregex=r'(purchase|po|order)') | Q(name__iregex=r'(purchase|po|order)')
+        ).count()
+        contracts_count = queryset.filter(
+            Q(category__name__iregex=r'(contract|agreement)') | Q(name__iregex=r'(contract|agreement)')
+        ).count()
+        warranty_expired_count = queryset.filter(
+            warranty_expires__isnull=False,
+            warranty_expires__lt=now
+        ).count()
+        warranty_expiring_count = queryset.filter(
+            warranty_expires__isnull=False,
+            warranty_expires__gte=now,
+            warranty_expires__lte=warranty_cutoff
+        ).count()
+
+        status_breakdown = (
+            queryset.values('status')
+            .annotate(count=Count('id'))
+            .order_by('status')
+        )
+        status_counts = {item['status']: item['count'] for item in status_breakdown}
+        for status_code, _ in Asset.STATUS_CHOICES:
+            status_counts.setdefault(status_code, 0)
+
+        type_breakdown = (
+            queryset.values('asset_type')
+            .annotate(count=Count('id'))
+            .order_by('asset_type')
+        )
+        type_counts = {item['asset_type']: item['count'] for item in type_breakdown}
+        for type_code, _ in Asset.ASSET_TYPE_CHOICES:
+            type_counts.setdefault(type_code, 0)
+
+        category_counts = (
+            queryset
+            .annotate(category_name=Coalesce('category__name', Value('Uncategorized')))
+            .values('category_name')
+            .annotate(count=Count('id'))
+            .order_by('-count')
+        )
+
+        top_categories = [
+            {'category': item['category_name'], 'count': item['count']}
+            for item in category_counts[:10]
+        ]
+
+        payload = {
+            'total_assets': total_assets,
+            'workstations': workstations_count,
+            'software': software_count,
+            'purchase_orders': purchase_orders_count,
+            'contracts': contracts_count,
+            'hardware': hardware_count,
+            'warranty_expiring': {
+                'total': warranty_expired_count + warranty_expiring_count,
+                'expired': warranty_expired_count,
+                'expiring': warranty_expiring_count,
+                'days': warranty_days,
+            },
+            'status_breakdown': status_counts,
+            'type_breakdown': type_counts,
+            'top_categories': top_categories,
+        }
+
+        return Response(payload)
 
 
 class AssetDepreciationViewSet(viewsets.ReadOnlyModelViewSet):
