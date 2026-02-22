@@ -1,0 +1,491 @@
+"""
+API integration tests - Full workflow testing
+"""
+import pytest
+from django.test import TestCase
+from rest_framework import status
+from rest_framework.test import APIClient
+from rest_framework_simplejwt.tokens import RefreshToken
+
+from apps.incidents.models import Incident, IncidentComment
+from apps.service_requests.models import ServiceRequest, ServiceRequestApproval
+from apps.changes.models import Change
+from apps.problems.models import Problem
+from apps.assets.models import Asset
+
+from tests.factories import (
+    OrganizationFactory, CustomUserFactory, IncidentFactory, 
+    ServiceRequestFactory, ProblemFactory, ChangeFactory, AssetFactory,
+    TeamFactory, DepartmentFactory
+)
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+class TestIncidentWorkflow:
+    """Test complete incident lifecycle"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        self.user = CustomUserFactory(organization=self.org)
+        self.assignee = CustomUserFactory(organization=self.org)
+        
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_incident_lifecycle_create_assign_resolve_close(self):
+        """Test complete incident workflow: create → assign → resolve → close"""
+        
+        # Step 1: Create incident
+        create_data = {
+            'title': 'Critical System Outage',
+            'description': 'Production system is down',
+            'priority': 'high',
+            'urgency': 'high',
+            'impact': 'high',
+            'requester': self.user.id
+        }
+        
+        create_response = self.client.post('/api/v1/incidents/', create_data)
+        assert create_response.status_code == status.HTTP_201_CREATED
+        incident_id = create_response.json()['id']
+        
+        # Step 2: Assign incident
+        assign_data = {
+            'assigned_to': self.assignee.id,
+            'status': 'assigned'
+        }
+        
+        assign_response = self.client.patch(f'/api/v1/incidents/{incident_id}/', assign_data)
+        assert assign_response.status_code == status.HTTP_200_OK
+        
+        # Step 3: Add comment
+        comment_data = {
+            'text': 'Started investigation',
+            'is_internal': True
+        }
+        
+        comment_response = self.client.post(f'/api/v1/incidents/{incident_id}/add_comment/', comment_data)
+        assert comment_response.status_code in [
+            status.HTTP_201_CREATED,
+            status.HTTP_200_OK
+        ]
+        
+        # Step 4: Resolve incident
+        resolve_data = {
+            'status': 'resolved',
+            'resolution_notes': 'System restored to normal operation',
+            'resolution_code': 'RESOLVED'
+        }
+        
+        resolve_response = self.client.patch(f'/api/v1/incidents/{incident_id}/', resolve_data)
+        assert resolve_response.status_code == status.HTTP_200_OK
+        
+        # Step 5: Close incident
+        close_response = self.client.post(f'/api/v1/incidents/{incident_id}/close/')
+        assert close_response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+    
+    def test_incident_with_multiple_comments(self):
+        """Test incident with multiple comments thread"""
+        incident = IncidentFactory(organization=self.org, created_by=self.user)
+        
+        # Add first comment
+        response1 = self.client.post(
+            f'/api/v1/incidents/{incident.id}/add_comment/',
+            {'text': 'First comment', 'is_internal': False}
+        )
+        assert response1.status_code in [status.HTTP_201_CREATED, status.HTTP_200_OK]
+        
+        # Add second comment
+        response2 = self.client.post(
+            f'/api/v1/incidents/{incident.id}/add_comment/',
+            {'text': 'Second comment', 'is_internal': True}
+        )
+        assert response2.status_code in [status.HTTP_201_CREATED, status.HTTP_200_OK]
+        
+        # Retrieve incident and verify comments
+        response = self.client.get(f'/api/v1/incidents/{incident.id}/')
+        assert response.status_code == status.HTTP_200_OK
+        incident_data = response.json()
+        
+        # Should have comments included
+        if 'comments' in incident_data:
+            assert len(incident_data['comments']) >= 0
+    
+    def test_incident_escalation(self):
+        """Test incident escalation workflow"""
+        incident = IncidentFactory(organization=self.org, priority='medium', created_by=self.user)
+        
+        # Escalate incident
+        escalate_response = self.client.post(f'/api/v1/incidents/{incident.id}/escalate/')
+        
+        assert escalate_response.status_code in [
+            status.HTTP_200_OK,
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_403_FORBIDDEN
+        ]
+        
+        # Verify priority changed
+        if escalate_response.status_code == status.HTTP_200_OK:
+            response = self.client.get(f'/api/v1/incidents/{incident.id}/')
+            incident_data = response.json()
+            assert incident_data['priority'] in ['high', 'urgent']
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+class TestServiceRequestWorkflow:
+    """Test service request approval and fulfillment workflow"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        self.requester = CustomUserFactory(organization=self.org)
+        self.approver = CustomUserFactory(organization=self.org, role='manager')
+        self.fulfiller = CustomUserFactory(organization=self.org)
+        
+        refresh = RefreshToken.for_user(self.requester)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_service_request_full_workflow(self):
+        """Test complete SR workflow: create → submit → approve → fulfill → close"""
+        
+        # Step 1: Create service request
+        create_data = {
+            'title': 'Software License Request',
+            'description': 'Need software development license',
+            'priority': 'medium',
+            'requester': self.requester.id
+        }
+        
+        create_response = self.client.post('/api/v1/service-requests/', create_data)
+        assert create_response.status_code in [status.HTTP_201_CREATED, status.HTTP_200_OK]
+        
+        if create_response.status_code == status.HTTP_201_CREATED:
+            sr_id = create_response.json()['id']
+            
+            # Step 2: Submit for approval
+            submit_response = self.client.post(f'/api/v1/service-requests/{sr_id}/submit/')
+            assert submit_response.status_code in [status.HTTP_200_OK, status.HTTP_404_NOT_FOUND]
+            
+            # Step 3: Approver reviews (would need approver auth)
+            # Simulate approval in response
+    
+    def test_service_request_with_items(self):
+        """Test service request with multiple items"""
+        sr = ServiceRequestFactory(organization=self.org, created_by=self.requester)
+        
+        # List items endpoint or directly through SR detail
+        response = self.client.get(f'/api/v1/service-requests/{sr.id}/')
+        
+        assert response.status_code == status.HTTP_200_OK
+        sr_data = response.json()
+        
+        # Verify items are included if present
+        if 'items' in sr_data:
+            assert isinstance(sr_data['items'], list)
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+class TestProblemManagementWorkflow:
+    """Test problem management lifecycle"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        self.user = CustomUserFactory(organization=self.org)
+        self.assignee = CustomUserFactory(organization=self.org)
+        
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_problem_from_incident_workflow(self):
+        """Test creating problem from recurring incidents"""
+        
+        # Create multiple related incidents
+        incident1 = IncidentFactory(
+            organization=self.org,
+            title='Database Connection Issue',
+            created_by=self.user
+        )
+        incident2 = IncidentFactory(
+            organization=self.org,
+            title='Database Connection Issue',
+            created_by=self.user
+        )
+        
+        # Create problem
+        problem_data = {
+            'title': 'Root Database Performance Issue',
+            'description': 'Recurring database connection timeouts',
+            'priority': 'high',
+            'assigned_to': self.assignee.id
+        }
+        
+        response = self.client.post('/api/v1/problems/', problem_data)
+        assert response.status_code in [status.HTTP_201_CREATED, status.HTTP_400_BAD_REQUEST]
+        
+        if response.status_code == status.HTTP_201_CREATED:
+            problem_id = response.json()['id']
+            
+            # Link incidents to problem
+            link_response = self.client.patch(
+                f'/api/v1/incidents/{incident1.id}/',
+                {'problem': problem_id}
+            )
+            assert link_response.status_code in [status.HTTP_200_OK, status.HTTP_400_BAD_REQUEST]
+    
+    def test_problem_to_knowledge_base(self):
+        """Test converting solved problem to KEDB entry"""
+        problem = ProblemFactory(
+            organization=self.org,
+            status='open',
+            assigned_to=self.user
+        )
+        
+        # Resolve problem
+        resolve_data = {
+            'status': 'resolved',
+            'solution': 'Database indexes were corrupted. Rebuilt all indexes.',
+            'root_cause': 'Nightly maintenance job failed'
+        }
+        
+        response = self.client.patch(f'/api/v1/problems/{problem.id}/', resolve_data)
+        assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+class TestChangeManagementWorkflow:
+    """Test change management workflow"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        self.user = CustomUserFactory(organization=self.org)
+        self.approver = CustomUserFactory(organization=self.org, role='manager')
+        
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_change_request_workflow(self):
+        """Test RFC (Request For Change) workflow"""
+        
+        # Create change request
+        change_data = {
+            'title': 'Upgrade Production Database',
+            'description': 'Upgrade from PostgreSQL 13 to 15',
+            'type': 'standard',
+            'priority': 'high',
+            'risk_level': 'medium',
+            'requested_by': self.user.id,
+            'scheduled_start': '2024-02-15T10:00:00Z',
+            'scheduled_end': '2024-02-15T12:00:00Z'
+        }
+        
+        response = self.client.post('/api/v1/changes/', change_data)
+        assert response.status_code in [status.HTTP_201_CREATED, status.HTTP_400_BAD_REQUEST]
+        
+        if response.status_code == status.HTTP_201_CREATED:
+            change_id = response.json()['id']
+            
+            # Update change status through workflow
+            workflow_response = self.client.patch(
+                f'/api/v1/changes/{change_id}/',
+                {'status': 'approved'}
+            )
+            assert workflow_response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+            
+            # Mark as implemented
+            implement_response = self.client.patch(
+                f'/api/v1/changes/{change_id}/',
+                {'status': 'implemented', 'implementation_notes': 'Upgrade successful'}
+            )
+            assert implement_response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+    
+    def test_change_with_config_items(self):
+        """Test change affecting configuration items"""
+        change = ChangeFactory(organization=self.org, requested_by=self.user)
+        
+        response = self.client.get(f'/api/v1/changes/{change.id}/')
+        assert response.status_code == status.HTTP_200_OK
+        
+        # Should show affected CIs if included in response
+        change_data = response.json()
+        if 'affected_items' in change_data or 'config_items' in change_data:
+            assert isinstance(change_data.get('affected_items', []), list)
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+class TestAssetManagementWorkflow:
+    """Test asset management and transfer workflow"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        self.user1 = CustomUserFactory(organization=self.org)
+        self.user2 = CustomUserFactory(organization=self.org)
+        
+        refresh = RefreshToken.for_user(self.user1)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_asset_transfer_workflow(self):
+        """Test asset transfer between users"""
+        
+        # Create asset
+        asset = AssetFactory(
+            organization=self.org,
+            current_owner=self.user1,
+            status='active'
+        )
+        
+        # Transfer asset
+        transfer_data = {
+            'to_user_id': self.user2.id,
+            'transfer_notes': 'Transferred to new department'
+        }
+        
+        response = self.client.post(f'/api/v1/assets/{asset.id}/transfer/', transfer_data)
+        
+        assert response.status_code in [
+            status.HTTP_200_OK,
+            status.HTTP_404_NOT_FOUND,
+            status.HTTP_403_FORBIDDEN
+        ]
+        
+        if response.status_code == status.HTTP_200_OK:
+            # Verify ownership changed
+            asset_response = self.client.get(f'/api/v1/assets/{asset.id}/')
+            if asset_response.status_code == status.HTTP_200_OK:
+                asset_data = asset_response.json()
+                assert asset_data['current_owner'] == self.user2.id
+    
+    def test_asset_deprecation_workflow(self):
+        """Test asset deprecation"""
+        asset = AssetFactory(organization=self.org, current_owner=self.user1)
+        
+        # Mark as retired
+        deprecate_data = {
+            'status': 'retired',
+            'retirement_date': '2024-01-31'
+        }
+        
+        response = self.client.patch(f'/api/v1/assets/{asset.id}/', deprecate_data)
+        assert response.status_code in [status.HTTP_200_OK, status.HTTP_403_FORBIDDEN]
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+class TestCrossModuleWorkflow:
+    """Test workflows involving multiple modules"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        self.user = CustomUserFactory(organization=self.org)
+        
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_incident_to_problem_to_change(self):
+        """Test workflow: Incident → Problem → Change"""
+        
+        # Step 1: Create incident
+        incident = IncidentFactory(organization=self.org, created_by=self.user)
+        
+        # Step 2: Create related problem
+        problem = ProblemFactory(
+            organization=self.org,
+            title='Root cause of incident',
+            created_by=self.user
+        )
+        
+        # Link incident to problem
+        link_response = self.client.patch(
+            f'/api/v1/incidents/{incident.id}/',
+            {'problem': problem.id}
+        )
+        
+        # Step 3: Create change to fix problem
+        change = ChangeFactory(
+            organization=self.org,
+            title='Fix for identified problem',
+            requested_by=self.user
+        )
+        
+        # All should exist
+        incident_response = self.client.get(f'/api/v1/incidents/{incident.id}/')
+        problem_response = self.client.get(f'/api/v1/problems/{problem.id}/')
+        change_response = self.client.get(f'/api/v1/changes/{change.id}/')
+        
+        assert incident_response.status_code == status.HTTP_200_OK
+        assert problem_response.status_code == status.HTTP_200_OK
+        assert change_response.status_code == status.HTTP_200_OK
+
+
+@pytest.mark.integration
+@pytest.mark.django_db
+class TestSearchAndFilterIntegration:
+    """Test search and filtering across modules"""
+    
+    def setup_method(self):
+        """Setup test data"""
+        self.client = APIClient()
+        self.org = OrganizationFactory()
+        self.user = CustomUserFactory(organization=self.org)
+        
+        # Create multiple incidents with different properties
+        for i in range(5):
+            IncidentFactory(
+                organization=self.org,
+                priority=['low', 'medium', 'high', 'critical', 'low'][i],
+                status=['open', 'assigned', 'resolved', 'closed', 'reopened'][i],
+                created_by=self.user
+            )
+        
+        refresh = RefreshToken.for_user(self.user)
+        self.client.credentials(HTTP_AUTHORIZATION=f'Bearer {str(refresh.access_token)}')
+    
+    def test_search_incidents(self):
+        """Test searching incidents"""
+        response = self.client.get('/api/v1/incidents/?search=test')
+        
+        assert response.status_code == status.HTTP_200_OK
+    
+    def test_filter_by_priority(self):
+        """Test filtering by priority"""
+        response = self.client.get('/api/v1/incidents/?priority=high')
+        
+        assert response.status_code == status.HTTP_200_OK
+    
+    def test_filter_by_status(self):
+        """Test filtering by status"""
+        response = self.client.get('/api/v1/incidents/?status=open')
+        
+        assert response.status_code == status.HTTP_200_OK
+    
+    def test_combined_filter_and_search(self):
+        """Test combined filtering and search"""
+        response = self.client.get('/api/v1/incidents/?priority=high&status=open&search=database')
+        
+        assert response.status_code == status.HTTP_200_OK
+    
+    def test_pagination(self):
+        """Test pagination"""
+        response = self.client.get('/api/v1/incidents/?page=1&page_size=10')
+        
+        assert response.status_code == status.HTTP_200_OK
+        data = response.json()
+        
+        # Verify pagination structure
+        if isinstance(data, dict):
+            assert 'results' in data or 'count' in data

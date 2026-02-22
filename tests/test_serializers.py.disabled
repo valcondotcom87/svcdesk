@@ -1,0 +1,314 @@
+"""
+Serializer validation tests
+"""
+import pytest
+from django.test import TestCase
+
+from apps.core.serializers import (
+    UserListSerializer, UserDetailSerializer, UserCreateUpdateSerializer,
+    OrganizationSerializer, TeamSerializer
+)
+from apps.incidents.serializers import (
+    IncidentListSerializer, IncidentDetailSerializer, IncidentCreateUpdateSerializer,
+    IncidentCommentSerializer
+)
+from apps.service_requests.serializers import (
+    ServiceRequestListSerializer, ServiceRequestDetailSerializer,
+    ServiceRequestCreateUpdateSerializer
+)
+
+from tests.factories import (
+    CustomUserFactory, OrganizationFactory, TeamFactory, IncidentFactory,
+    IncidentCommentFactory, ServiceRequestFactory
+)
+
+
+@pytest.mark.serializer
+class TestUserSerializers(TestCase):
+    """Test user serializers"""
+    
+    def setUp(self):
+        self.org = OrganizationFactory()
+        self.user = CustomUserFactory(organization=self.org)
+    
+    def test_user_list_serializer(self):
+        """Test UserListSerializer has required fields"""
+        serializer = UserListSerializer(self.user)
+        data = serializer.data
+        
+        assert 'id' in data
+        assert 'username' in data
+        assert 'email' in data
+        assert 'first_name' in data
+        assert 'last_name' in data
+    
+    def test_user_detail_serializer(self):
+        """Test UserDetailSerializer includes all fields"""
+        serializer = UserDetailSerializer(self.user)
+        data = serializer.data
+        
+        assert 'id' in data
+        assert 'username' in data
+        assert 'email' in data
+        assert 'organization' in data
+        assert 'is_active' in data
+    
+    def test_user_create_update_serializer_validation(self):
+        """Test UserCreateUpdateSerializer validates password"""
+        data = {
+            'username': 'newuser',
+            'email': 'new@example.com',
+            'password': 'newpass123',
+            'password_confirm': 'newpass123'
+        }
+        
+        serializer = UserCreateUpdateSerializer(data=data)
+        # Should be valid if password matches
+        assert serializer.is_valid()
+    
+    def test_user_create_serializer_password_mismatch(self):
+        """Test serializer validates password confirmation"""
+        data = {
+            'username': 'newuser',
+            'email': 'new@example.com',
+            'password': 'newpass123',
+            'password_confirm': 'different123'
+        }
+        
+        serializer = UserCreateUpdateSerializer(data=data)
+        assert not serializer.is_valid()
+        assert 'password' in serializer.errors or 'non_field_errors' in serializer.errors
+
+
+@pytest.mark.serializer
+class TestIncidentSerializers(TestCase):
+    """Test incident serializers"""
+    
+    def setUp(self):
+        self.org = OrganizationFactory()
+        self.user = CustomUserFactory(organization=self.org)
+        self.incident = IncidentFactory(
+            organization=self.org,
+            requester=self.user,
+            created_by=self.user
+        )
+    
+    def test_incident_list_serializer(self):
+        """Test IncidentListSerializer has required fields"""
+        serializer = IncidentListSerializer(self.incident)
+        data = serializer.data
+        
+        assert 'id' in data
+        assert 'ticket_number' in data
+        assert 'title' in data
+        assert 'priority_display' in data
+        assert 'status_display' in data
+    
+    def test_incident_detail_serializer(self):
+        """Test IncidentDetailSerializer includes nested relations"""
+        serializer = IncidentDetailSerializer(self.incident)
+        data = serializer.data
+        
+        assert 'id' in data
+        assert 'ticket_number' in data
+        assert 'requester_name' in data
+        assert 'comments' in data
+        assert 'workarounds' in data
+        assert 'attachments' in data
+    
+    def test_incident_create_serializer_validation(self):
+        """Test IncidentCreateUpdateSerializer validates required fields"""
+        data = {
+            'title': 'Test Incident',
+            'description': 'Test description',
+            'priority': 'high',
+            'urgency': 'high',
+            'impact': 'high'
+        }
+        
+        serializer = IncidentCreateUpdateSerializer(data=data)
+        assert serializer.is_valid()
+    
+    def test_incident_comment_serializer(self):
+        """Test IncidentCommentSerializer"""
+        comment = IncidentCommentFactory(
+            incident=self.incident,
+            created_by=self.user
+        )
+        
+        serializer = IncidentCommentSerializer(comment)
+        data = serializer.data
+        
+        assert 'id' in data
+        assert 'text' in data
+        assert 'is_internal' in data
+        assert 'created_by_name' in data
+
+
+@pytest.mark.serializer
+@pytest.mark.django_db
+class TestOrganizationSerializer:
+    """Test organization serializer"""
+    
+    def test_organization_serializer(self):
+        """Test OrganizationSerializer"""
+        org = OrganizationFactory()
+        
+        serializer = OrganizationSerializer(org)
+        data = serializer.data
+        
+        assert data['id'] == org.id
+        assert data['name'] == org.name
+        assert data['code'] == org.code
+        assert 'user_count' in data
+        assert 'team_count' in data
+    
+    def test_team_serializer(self):
+        """Test TeamSerializer with member count"""
+        org = OrganizationFactory()
+        user1 = CustomUserFactory(organization=org)
+        user2 = CustomUserFactory(organization=org)
+        
+        team = TeamFactory(organization=org)
+        team.members.add(user1, user2)
+        
+        serializer = TeamSerializer(team)
+        data = serializer.data
+        
+        assert 'member_count' in data
+        assert data['member_count'] == 2
+
+
+@pytest.mark.serializer
+@pytest.mark.django_db
+class TestServiceRequestSerializer:
+    """Test service request serializer"""
+    
+    def test_service_request_list_serializer(self):
+        """Test ServiceRequestListSerializer"""
+        org = OrganizationFactory()
+        user = CustomUserFactory(organization=org)
+        
+        sr = ServiceRequestFactory(
+            organization=org,
+            requester=user,
+            created_by=user
+        )
+        
+        serializer = ServiceRequestListSerializer(sr)
+        data = serializer.data
+        
+        assert 'id' in data
+        assert 'request_number' in data
+        assert 'requester_name' in data
+        assert 'status_display' in data
+    
+    def test_service_request_detail_serializer(self):
+        """Test ServiceRequestDetailSerializer with nested items"""
+        org = OrganizationFactory()
+        user = CustomUserFactory(organization=org)
+        
+        sr = ServiceRequestFactory(
+            organization=org,
+            requester=user,
+            created_by=user
+        )
+        
+        serializer = ServiceRequestDetailSerializer(sr)
+        data = serializer.data
+        
+        assert 'items' in data
+        assert 'approvals' in data
+        assert 'attachments' in data
+        assert isinstance(data['items'], list)
+
+
+@pytest.mark.serializer
+@pytest.mark.django_db
+class TestSerializerReadOnlyFields:
+    """Test that read-only fields are properly set"""
+    
+    def test_user_serializer_timestamp_readonly(self):
+        """Test that timestamps are read-only in user serializer"""
+        user = CustomUserFactory()
+        
+        serializer = UserDetailSerializer(user)
+        data = serializer.data
+        
+        assert 'created_at' in data
+        assert 'updated_at' in data
+    
+    def test_incident_serializer_ticket_number_readonly(self):
+        """Test that ticket_number is auto-generated and read-only"""
+        org = OrganizationFactory()
+        user = CustomUserFactory(organization=org)
+        incident = IncidentFactory(organization=org, created_by=user)
+        
+        serializer = IncidentDetailSerializer(incident)
+        data = serializer.data
+        
+        # ticket_number should be in data and read-only
+        assert 'ticket_number' in data
+        assert data['ticket_number'] == incident.ticket_number
+
+
+@pytest.mark.serializer
+@pytest.mark.django_db
+class TestSerializerValidation:
+    """Test serializer custom validation"""
+    
+    def test_user_email_validation(self):
+        """Test email format validation"""
+        data = {
+            'username': 'testuser',
+            'email': 'invalid-email',
+            'password': 'pass123456',
+        }
+        
+        serializer = UserCreateUpdateSerializer(data=data)
+        # Email validation should fail
+        assert not serializer.is_valid() or 'email' in serializer.errors or 'password' in serializer.errors
+    
+    def test_user_password_length_validation(self):
+        """Test password minimum length"""
+        data = {
+            'username': 'testuser',
+            'email': 'test@example.com',
+            'password': 'short',
+        }
+        
+        serializer = UserCreateUpdateSerializer(data=data)
+        # Password too short
+        assert not serializer.is_valid()
+
+
+@pytest.mark.serializer
+@pytest.mark.django_db
+class TestSerializerNesting:
+    """Test nested serializers"""
+    
+    def test_incident_detail_nested_comments(self):
+        """Test incident detail serializer includes nested comments"""
+        org = OrganizationFactory()
+        user = CustomUserFactory(organization=org)
+        incident = IncidentFactory(organization=org, created_by=user)
+        
+        # Create comments
+        comment1 = IncidentCommentFactory(incident=incident, created_by=user)
+        comment2 = IncidentCommentFactory(incident=incident, created_by=user)
+        
+        serializer = IncidentDetailSerializer(incident)
+        data = serializer.data
+        
+        assert 'comments' in data
+        assert len(data['comments']) == 2
+    
+    def test_team_serializer_nested_organization(self):
+        """Test team serializer includes organization name"""
+        org = OrganizationFactory(name='Test Org')
+        team = TeamFactory(organization=org)
+        
+        serializer = TeamSerializer(team)
+        data = serializer.data
+        
+        assert 'organization_name' in data or 'organization' in data
