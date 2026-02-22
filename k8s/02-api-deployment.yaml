@@ -1,0 +1,425 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: itsm-api
+  namespace: itsm-system
+  labels:
+    app: itsm-api
+    version: v2.0
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: itsm-api
+  template:
+    metadata:
+      labels:
+        app: itsm-api
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: "/metrics/"
+    spec:
+      serviceAccountName: itsm-api
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 1000
+      containers:
+      - name: django
+        image: ghcr.io/your-org/itsm-api:latest
+        imagePullPolicy: IfNotPresent
+        ports:
+        - containerPort: 8000
+          name: http
+          protocol: TCP
+        env:
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DEBUG
+        - name: ENVIRONMENT
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: ENVIRONMENT
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: SECRET_KEY
+        - name: ALLOWED_HOSTS
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: ALLOWED_HOSTS
+        - name: DB_ENGINE
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_ENGINE
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_PASSWORD
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_PORT
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: REDIS_URL
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: CELERY_RESULT_BACKEND
+        - name: JWT_SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: JWT_SECRET_KEY
+        - name: LOG_LEVEL
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: LOG_LEVEL
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 30
+          periodSeconds: 10
+          timeoutSeconds: 5
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 10
+          periodSeconds: 5
+          timeoutSeconds: 3
+          failureThreshold: 3
+        startupProbe:
+          httpGet:
+            path: /health/
+            port: 8000
+            scheme: HTTP
+          initialDelaySeconds: 0
+          periodSeconds: 10
+          timeoutSeconds: 3
+          failureThreshold: 30
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: false
+          capabilities:
+            drop:
+              - ALL
+        volumeMounts:
+        - name: tmp
+          mountPath: /tmp
+      initContainers:
+      - name: migrate
+        image: ghcr.io/your-org/itsm-api:latest
+        imagePullPolicy: IfNotPresent
+        command:
+          - python
+          - manage.py
+          - migrate
+          - --noinput
+        env:
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DEBUG
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: SECRET_KEY
+        - name: DB_ENGINE
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_ENGINE
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_PASSWORD
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_PORT
+      volumes:
+      - name: tmp
+        emptyDir: {}
+      affinity:
+        podAntiAffinity:
+          preferredDuringSchedulingIgnoredDuringExecution:
+          - weight: 100
+            podAffinityTerm:
+              labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - itsm-api
+              topologyKey: kubernetes.io/hostname
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: itsm-api
+  namespace: itsm-system
+  labels:
+    app: itsm-api
+spec:
+  type: ClusterIP
+  selector:
+    app: itsm-api
+  ports:
+  - name: http
+    port: 8000
+    targetPort: http
+    protocol: TCP
+  sessionAffinity: ClientIP
+  sessionAffinityConfig:
+    clientIP:
+      timeoutSeconds: 10800
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: itsm-worker
+  namespace: itsm-system
+  labels:
+    app: itsm-worker
+spec:
+  replicas: 2
+  selector:
+    matchLabels:
+      app: itsm-worker
+  template:
+    metadata:
+      labels:
+        app: itsm-worker
+    spec:
+      serviceAccountName: itsm-worker
+      containers:
+      - name: celery
+        image: ghcr.io/your-org/itsm-api:latest
+        imagePullPolicy: IfNotPresent
+        command:
+          - celery
+          - -A
+          - itsm_project
+          - worker
+          - -l
+          - info
+          - -c
+          - "4"
+        env:
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DEBUG
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: SECRET_KEY
+        - name: DB_ENGINE
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_ENGINE
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_PASSWORD
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_PORT
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: CELERY_RESULT_BACKEND
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: itsm-beat
+  namespace: itsm-system
+  labels:
+    app: itsm-beat
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: itsm-beat
+  template:
+    metadata:
+      labels:
+        app: itsm-beat
+    spec:
+      serviceAccountName: itsm-beat
+      containers:
+      - name: celery-beat
+        image: ghcr.io/your-org/itsm-api:latest
+        imagePullPolicy: IfNotPresent
+        command:
+          - celery
+          - -A
+          - itsm_project
+          - beat
+          - -l
+          - info
+        env:
+        - name: DEBUG
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DEBUG
+        - name: SECRET_KEY
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: SECRET_KEY
+        - name: DB_ENGINE
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_ENGINE
+        - name: DB_NAME
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_NAME
+        - name: DB_USER
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_USER
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: DB_PASSWORD
+        - name: DB_HOST
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_HOST
+        - name: DB_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: DB_PORT
+        - name: CELERY_BROKER_URL
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: CELERY_BROKER_URL
+        - name: CELERY_RESULT_BACKEND
+          valueFrom:
+            configMapKeyRef:
+              name: itsm-config
+              key: CELERY_RESULT_BACKEND
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"

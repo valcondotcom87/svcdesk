@@ -1,0 +1,264 @@
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: itsm-system
+  labels:
+    name: itsm-system
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: itsm-config
+  namespace: itsm-system
+data:
+  DEBUG: "False"
+  ENVIRONMENT: "production"
+  ALLOWED_HOSTS: "api.example.com,localhost"
+  DB_ENGINE: "django.db.backends.postgresql"
+  DB_NAME: "itsm_db"
+  DB_HOST: "postgres"
+  DB_PORT: "5432"
+  REDIS_URL: "redis://redis-master:6379/0"
+  CELERY_BROKER_URL: "redis://redis-master:6379/0"
+  CELERY_RESULT_BACKEND: "redis://redis-master:6379/0"
+  TIME_ZONE: "UTC"
+  LANGUAGE_CODE: "en-us"
+  LOG_LEVEL: "INFO"
+  API_TITLE: "ITSM Platform API"
+  API_VERSION: "2.0"
+
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: itsm-secrets
+  namespace: itsm-system
+type: Opaque
+stringData:
+  SECRET_KEY: "your-secret-key-change-in-production"
+  DB_USER: "postgres"
+  DB_PASSWORD: "postgres-secure-password"
+  REDIS_PASSWORD: "redis-secure-password"
+  JWT_SECRET_KEY: "jwt-secret-key-change-in-production"
+  EMAIL_HOST_USER: "noreply@example.com"
+  EMAIL_HOST_PASSWORD: "email-app-password"
+  SENTRY_DSN: "https://your-sentry-dsn@sentry.io/project"
+  AWS_ACCESS_KEY_ID: ""
+  AWS_SECRET_ACCESS_KEY: ""
+  GRAFANA_PASSWORD: "admin"
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: prometheus-config
+  namespace: itsm-system
+data:
+  prometheus.yml: |
+    global:
+      scrape_interval: 15s
+      evaluation_interval: 15s
+    alerting:
+      alertmanagers:
+        - static_configs:
+            - targets:
+                - alertmanager:9093
+    rule_files:
+      - /etc/prometheus/rules/*.yml
+    scrape_configs:
+      - job_name: 'prometheus'
+        static_configs:
+          - targets: ['localhost:9090']
+      
+      - job_name: 'django'
+        static_configs:
+          - targets: ['itsm-api:8000']
+        metrics_path: '/metrics/'
+        scrape_interval: 30s
+      
+      - job_name: 'postgres'
+        static_configs:
+          - targets: ['postgres-exporter:9187']
+        scrape_interval: 30s
+      
+      - job_name: 'redis'
+        static_configs:
+          - targets: ['redis-exporter:9121']
+        scrape_interval: 30s
+      
+      - job_name: 'kubernetes-nodes'
+        kubernetes_sd_configs:
+          - role: node
+      
+      - job_name: 'kubernetes-pods'
+        kubernetes_sd_configs:
+          - role: pod
+        relabel_configs:
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_scrape]
+            action: keep
+            regex: "true"
+          - source_labels: [__meta_kubernetes_pod_annotation_prometheus_io_path]
+            action: replace
+            target_label: __metrics_path__
+            regex: (.+)
+          - source_labels: [__address__, __meta_kubernetes_pod_annotation_prometheus_io_port]
+            action: replace
+            regex: ([^:]+)(?::\d+)?;(\d+)
+            replacement: $1:$2
+            target_label: __address__
+
+  alert-rules.yml: |
+    groups:
+      - name: django
+        interval: 30s
+        rules:
+          - alert: DjangoDown
+            expr: up{job="django"} == 0
+            for: 2m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Django API is down"
+              description: "Django API has been down for more than 2 minutes"
+
+          - alert: HighErrorRate
+            expr: increase(django_http_requests_total{status=~"5.."}[5m]) > 10
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High error rate in Django"
+              description: "Error rate is above threshold"
+
+          - alert: SlowResponse
+            expr: histogram_quantile(0.95, django_http_request_duration_seconds) > 1
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Slow response times detected"
+              description: "95th percentile response time exceeds 1 second"
+
+      - name: database
+        interval: 30s
+        rules:
+          - alert: PostgreSQLDown
+            expr: up{job="postgres"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "PostgreSQL is down"
+              description: "PostgreSQL database is unreachable"
+
+          - alert: HighConnectionCount
+            expr: pg_stat_activity_count > 80
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High database connections"
+              description: "Database connection count is above 80"
+
+          - alert: LowDiskSpace
+            expr: (node_filesystem_avail_bytes{mountpoint="/var/lib/postgresql"} / node_filesystem_size_bytes) < 0.1
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "Low disk space on database"
+              description: "Less than 10% disk space available"
+
+      - name: redis
+        interval: 30s
+        rules:
+          - alert: RedisDown
+            expr: up{job="redis"} == 0
+            for: 1m
+            labels:
+              severity: critical
+            annotations:
+              summary: "Redis is down"
+              description: "Redis cache is unreachable"
+
+          - alert: HighMemoryUsage
+            expr: (redis_memory_used_bytes / redis_memory_max_bytes) > 0.85
+            for: 5m
+            labels:
+              severity: warning
+            annotations:
+              summary: "High Redis memory usage"
+              description: "Redis memory usage exceeds 85%"
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: postgres-pv
+  namespace: itsm-system
+spec:
+  capacity:
+    storage: 50Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fast-ssd
+  local:
+    path: /mnt/data/postgres
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - primary-node
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: redis-pv
+  namespace: itsm-system
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fast-ssd
+  local:
+    path: /mnt/data/redis
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - primary-node
+
+---
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: prometheus-pv
+  namespace: itsm-system
+spec:
+  capacity:
+    storage: 20Gi
+  accessModes:
+    - ReadWriteOnce
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: fast-ssd
+  local:
+    path: /mnt/data/prometheus
+  nodeAffinity:
+    required:
+      nodeSelectorTerms:
+      - matchExpressions:
+        - key: kubernetes.io/hostname
+          operator: In
+          values:
+          - primary-node

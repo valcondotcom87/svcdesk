@@ -1,0 +1,332 @@
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: itsm-ingress
+  namespace: itsm-system
+  annotations:
+    kubernetes.io/ingress.class: nginx
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+    nginx.ingress.kubernetes.io/ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/force-ssl-redirect: "true"
+    nginx.ingress.kubernetes.io/rate-limit: "100"
+    nginx.ingress.kubernetes.io/enable-cors: "true"
+    nginx.ingress.kubernetes.io/cors-allow-origin: "*"
+    nginx.ingress.kubernetes.io/proxy-body-size: "100m"
+spec:
+  tls:
+  - hosts:
+    - api.example.com
+    - admin.example.com
+    secretName: itsm-tls-cert
+  rules:
+  - host: api.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: itsm-api
+            port:
+              number: 8000
+      - path: /health/
+        pathType: Prefix
+        backend:
+          service:
+            name: itsm-api
+            port:
+              number: 8000
+  - host: admin.example.com
+    http:
+      paths:
+      - path: /
+        pathType: Prefix
+        backend:
+          service:
+            name: django-admin
+            port:
+              number: 8000
+
+---
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: itsm-cert
+  namespace: itsm-system
+spec:
+  secretName: itsm-tls-cert
+  issuerRef:
+    name: letsencrypt-prod
+    kind: ClusterIssuer
+  dnsNames:
+  - api.example.com
+  - admin.example.com
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: itsm-api-monitor
+  namespace: itsm-system
+spec:
+  selector:
+    matchLabels:
+      app: itsm-api
+  endpoints:
+  - port: http
+    path: /metrics/
+    interval: 30s
+    scrapeTimeout: 10s
+
+---
+apiVersion: monitoring.coreos.com/v1
+kind: PrometheusRule
+metadata:
+  name: itsm-alerts
+  namespace: itsm-system
+spec:
+  groups:
+  - name: itsm.rules
+    interval: 30s
+    rules:
+    - alert: ItsmApiDown
+      expr: up{job="django", namespace="itsm-system"} == 0
+      for: 2m
+      annotations:
+        summary: "ITSM API is down"
+        description: "ITSM API pod has been down for 2 minutes"
+      labels:
+        severity: critical
+
+    - alert: ItsmHighErrorRate
+      expr: increase(django_http_requests_total{status=~"5.."}[5m]) > 10
+      for: 5m
+      annotations:
+        summary: "High error rate in ITSM API"
+        description: "Error rate is above threshold"
+      labels:
+        severity: warning
+
+    - alert: ItsmHighCpuUsage
+      expr: 'sum(rate(container_cpu_usage_seconds_total{pod=~"itsm-api.*"}[5m])) by (pod) > 0.8'
+      for: 5m
+      annotations:
+        summary: "High CPU usage in ITSM API"
+        description: "CPU usage is above 80%"
+      labels:
+        severity: warning
+
+    - alert: ItsmHighMemoryUsage
+      expr: 'sum(container_memory_usage_bytes{pod=~"itsm-api.*"}) by (pod) > 1000000000'
+      for: 5m
+      annotations:
+        summary: "High memory usage in ITSM API"
+        description: "Memory usage is above 1GB"
+      labels:
+        severity: warning
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: kube-metrics
+  namespace: kube-system
+  labels:
+    app: kubelet
+spec:
+  ports:
+  - name: https-metrics
+    port: 10250
+    targetPort: 10250
+  selector:
+    component: kubelet
+
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: nginx-access-log-config
+  namespace: itsm-system
+data:
+  log_format.conf: |
+    log_format json_combined escape=json
+    '{'
+      '"timestamp":"$time_iso8601",'
+      '"client_ip":"$remote_addr",'
+      '"request":"$request",'
+      '"status":$status,'
+      '"response_time":$request_time,'
+      '"upstream_time":"$upstream_response_time",'
+      '"bytes_sent":$bytes_sent,'
+      '"user_agent":"$http_user_agent",'
+      '"referer":"$http_referer"'
+    '}';
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: prometheus
+  namespace: itsm-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: prometheus
+  template:
+    metadata:
+      labels:
+        app: prometheus
+    spec:
+      serviceAccountName: prometheus
+      containers:
+      - name: prometheus
+        image: prom/prometheus:latest
+        args:
+          - '--config.file=/etc/prometheus/prometheus.yml'
+          - '--storage.tsdb.path=/prometheus'
+          - '--storage.tsdb.retention.time=30d'
+          - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+          - '--web.console.templates=/usr/share/prometheus/consoles'
+        ports:
+        - containerPort: 9090
+          name: web
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        volumeMounts:
+        - name: prometheus-config
+          mountPath: /etc/prometheus
+        - name: prometheus-storage
+          mountPath: /prometheus
+      volumes:
+      - name: prometheus-config
+        configMap:
+          name: prometheus-config
+      - name: prometheus-storage
+        persistentVolumeClaim:
+          claimName: prometheus-pvc
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: prometheus
+  namespace: itsm-system
+spec:
+  type: ClusterIP
+  selector:
+    app: prometheus
+  ports:
+  - name: web
+    port: 9090
+    targetPort: 9090
+
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: grafana
+  namespace: itsm-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: grafana
+  template:
+    metadata:
+      labels:
+        app: grafana
+    spec:
+      containers:
+      - name: grafana
+        image: grafana/grafana:latest
+        ports:
+        - containerPort: 3000
+          name: web
+        env:
+        - name: GF_SECURITY_ADMIN_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: itsm-secrets
+              key: GRAFANA_PASSWORD
+        - name: GF_INSTALL_PLUGINS
+          value: "grafana-clock-panel,grafana-simple-json-datasource"
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        volumeMounts:
+        - name: grafana-storage
+          mountPath: /var/lib/grafana
+        - name: grafana-provisioning
+          mountPath: /etc/grafana/provisioning
+      volumes:
+      - name: grafana-storage
+        emptyDir: {}
+      - name: grafana-provisioning
+        configMap:
+          name: grafana-provisioning
+
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: grafana
+  namespace: itsm-system
+spec:
+  type: ClusterIP
+  selector:
+    app: grafana
+  ports:
+  - name: web
+    port: 3000
+    targetPort: 3000
+
+---
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: prometheus
+  namespace: itsm-system
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: prometheus
+rules:
+- apiGroups: [""]
+  resources:
+  - nodes
+  - nodes/proxy
+  - services
+  - endpoints
+  - pods
+  verbs: ["get", "list", "watch"]
+- apiGroups:
+  - extensions
+  resources:
+  - ingresses
+  verbs: ["get", "list", "watch"]
+
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: prometheus
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: prometheus
+subjects:
+- kind: ServiceAccount
+  name: prometheus
+  namespace: itsm-system
